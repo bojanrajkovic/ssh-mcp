@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -21,6 +22,9 @@ type Server struct {
 	Key        string // client private key path
 	KnownHosts string // pre-seeded with the server's host key
 	Dir        string
+	// acceptNew relaxes host key checking for servers whose key is not known
+	// before start, which is every containerised server.
+	acceptNew bool
 	// SocketDir is a deliberately short path for ControlPath sockets. Unix
 	// domain socket paths are capped near 104 bytes on macOS, and t.TempDir
 	// there sits under /var/folders/<random>/T/<test name>/, which overruns
@@ -114,6 +118,31 @@ Subsystem sftp %s
 		Dir:        dir,
 		SocketDir:  sockDir,
 	}
+}
+
+// SSHArgs returns the ssh flags that reach this server, pinned to the
+// generated key and known_hosts so tests never touch the caller's real
+// SSH configuration.
+func (s *Server) SSHArgs(extra ...string) []string {
+	args := []string{
+		"-F", "/dev/null",
+		"-i", s.Key,
+		"-o", "UserKnownHostsFile=" + s.KnownHosts,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "StrictHostKeyChecking=" + s.hostKeyPolicy(),
+		"-p", strconv.Itoa(s.Port),
+	}
+	return append(args, extra...)
+}
+
+// Target is the user@host the server accepts.
+func (s *Server) Target() string { return s.User + "@127.0.0.1" }
+
+func (s *Server) hostKeyPolicy() string {
+	if s.acceptNew {
+		return "accept-new"
+	}
+	return "yes"
 }
 
 func readFile(t *testing.T, path string) []byte {
