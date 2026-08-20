@@ -28,6 +28,7 @@ OpenSSH or the remote host already tracks it.
 | `cmd/ssh-mcp` | Entry point, stdout capture, signal handling |
 | `internal/server` | MCP server wiring and transport |
 | `internal/sshcfg` | Identifier derivation, stanza rendering, the config file |
+| `internal/conn` | Control masters: connect, check liveness, disconnect |
 | `internal/version` | Link-time build stamp |
 | `internal/sshtest` | Throwaway sshd for integration tests |
 

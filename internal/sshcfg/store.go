@@ -223,6 +223,10 @@ func (s *Store) renderStanza(id ID, o Options) string {
 	for _, k := range sortedKeys(o.SetEnv) {
 		fmt.Fprintf(&b, "    SetEnv %s\n", quote(k+"="+o.SetEnv[k]))
 	}
+	// Without BatchMode a passphrase-protected key or a password-auth host
+	// makes ssh prompt, and a server with no tty has nothing to answer with.
+	// This turns a hang into a clear authentication failure.
+	b.WriteString("    BatchMode yes\n")
 	b.WriteString("    ControlMaster auto\n")
 	fmt.Fprintf(&b, "    ControlPath %s\n", quote(s.ControlPath(id)))
 	fmt.Fprintf(&b, "    ControlPersist %s\n", controlPersist)

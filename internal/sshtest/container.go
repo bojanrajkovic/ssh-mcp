@@ -71,7 +71,7 @@ func StartContainer(t *testing.T, img Image) *Server {
 
 	dir := t.TempDir()
 	clientKey := filepath.Join(dir, "client_key")
-	keygen(t, clientKey)
+	Keygen(t, clientKey)
 	pub := strings.TrimSpace(string(readFile(t, clientKey+".pub")))
 
 	// The container's host key is not known until it starts, so trust it on

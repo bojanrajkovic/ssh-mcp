@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/bojanrajkovic/ssh-mcp/internal/sshcfg"
 )
 
 // Server is a running sshd and the client material needed to reach it.
@@ -56,8 +58,8 @@ func Start(t *testing.T) *Server {
 	dir := t.TempDir()
 	hostKey := filepath.Join(dir, "host_key")
 	clientKey := filepath.Join(dir, "client_key")
-	keygen(t, hostKey)
-	keygen(t, clientKey)
+	Keygen(t, hostKey)
+	Keygen(t, clientKey)
 
 	authorized := filepath.Join(dir, "authorized_keys")
 	writeFile(t, authorized, readFile(t, clientKey+".pub"))
@@ -138,6 +140,18 @@ func (s *Server) SSHArgs(extra ...string) []string {
 // Target is the user@host the server accepts.
 func (s *Server) Target() string { return s.User + "@127.0.0.1" }
 
+// Options describe this server as a connection, for tests that drive the real
+// configuration and connection code rather than ssh directly.
+func (s *Server) Options() sshcfg.Options {
+	return sshcfg.Options{
+		Host:           "127.0.0.1",
+		Port:           s.Port,
+		User:           s.User,
+		IdentityFile:   s.Key,
+		ConnectTimeout: 10 * time.Second,
+	}
+}
+
 func (s *Server) hostKeyPolicy() string {
 	if s.acceptNew {
 		return "accept-new"
@@ -173,7 +187,8 @@ func findBinary(name string, candidates ...string) string {
 	return ""
 }
 
-func keygen(t *testing.T, path string) {
+// Keygen writes an ed25519 keypair at path, with no passphrase.
+func Keygen(t *testing.T, path string) {
 	t.Helper()
 	cmd := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-f", path, "-N", "")
 	if out, err := cmd.CombinedOutput(); err != nil {
