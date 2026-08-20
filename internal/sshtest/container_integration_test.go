@@ -79,14 +79,24 @@ func TestContainerJobWrapperSurvivesDisconnect(t *testing.T) {
 			}
 
 			dir := "/tmp/job1"
+			// Background only the setsid, then finish with a foreground
+			// command. Backgrounding the whole list instead forks a subshell
+			// whose own stdout and stderr are still ssh's, and bash keeps that
+			// subshell alive waiting on setsid, so ssh blocks until the job
+			// ends. Busybox ash hides the bug by exec-optimising the last
+			// command of the list.
 			launch := fmt.Sprintf(
-				"mkdir -p %s && setsid nohup sh -c '(sleep 2; echo out-line; echo err-line >&2; exit 7)"+
-					" >%s/out 2>%s/err; echo $? >%s/rc' >/dev/null 2>&1 </dev/null &",
+				"mkdir -p %s; setsid nohup sh -c '(sleep 2; echo out-line; echo err-line >&2; exit 7)"+
+					" >%s/out 2>%s/err; echo $? >%s/rc' </dev/null >/dev/null 2>&1 & echo launched",
 				dir, dir, dir, dir)
 
 			start := time.Now()
-			if out, err := run(t, srv, launch); err != nil {
+			out, err := run(t, srv, launch)
+			if err != nil {
 				t.Fatalf("launch: %v\n%s", err, out)
+			}
+			if out != "launched" {
+				t.Fatalf("launch stdout = %q, want %q", out, "launched")
 			}
 			// The launching connection must return before the job finishes,
 			// otherwise this proves nothing about detachment.
