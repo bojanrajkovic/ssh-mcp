@@ -65,5 +65,5 @@ mise run test
 mise run build
 """
 
-[settings]
-task_output = "prefix"
+[settings.task]
+output = "prefix"
