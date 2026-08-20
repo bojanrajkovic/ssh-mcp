@@ -64,6 +64,10 @@ Four layers, in descending order of how much of the suite lives there:
    Container tests skip when no runtime is found. The runtime is resolved by
    binary name — `docker`, then `podman`, then `nerdctl` — so a shell alias
    like `docker=nerdctl` does not help, because `exec` never sees aliases.
+   Rootless podman (`dnf install podman`) is the least-friction option on
+   Fedora: no daemon, no privileged setup, and a Docker-compatible CLI. Note
+   that nerdctl always enters rootless mode when run as non-root, so it cannot
+   reach a system containerd no matter what `--address` says.
 4. **Manual** — channel push needs a live Claude Code session started with
    `--dangerously-load-development-channels`. Verify before releases.
 
