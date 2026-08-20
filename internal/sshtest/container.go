@@ -83,6 +83,9 @@ func StartContainer(t *testing.T, img Image) *Server {
 		"set -e",
 		img.Install,
 		"ssh-keygen -A",
+		// Debian's sshd refuses to start without its privilege separation
+		// directory, which the slim images do not create.
+		"mkdir -p /run/sshd",
 		"mkdir -p /root/.ssh",
 		`printf '%s\n' "$PUBKEY" > /root/.ssh/authorized_keys`,
 		"chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys",
@@ -90,14 +93,26 @@ func StartContainer(t *testing.T, img Image) *Server {
 		"exec /usr/sbin/sshd -D -e",
 	}, "\n")
 
-	out, err := exec.Command(rt, "run", "-d", "--rm",
+	// Output, not CombinedOutput: `run -d` writes image pull progress to
+	// stderr and the container ID to stdout. Merging them yields an ID with
+	// pull chatter glued to it, which only breaks on a cold image cache.
+	//
+	// No --rm either: a container whose boot script fails must survive long
+	// enough for cleanup to read its logs.
+	var stderr strings.Builder
+	cmd := exec.Command(rt, "run", "-d",
 		"-p", "127.0.0.1::22",
 		"-e", "PUBKEY="+pub,
-		img.Name, "sh", "-c", boot).CombinedOutput()
+		img.Name, "sh", "-c", boot)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("start %s: %v\n%s", img.Name, err, out)
+		t.Fatalf("start %s: %v\n%s", img.Name, err, stderr.String())
 	}
 	id := strings.TrimSpace(string(out))
+	if id == "" || strings.ContainsAny(id, " \n\t") {
+		t.Fatalf("unexpected container id %q from %s run -d", id, rt)
+	}
 	t.Cleanup(func() {
 		if t.Failed() {
 			if logs, lerr := exec.Command(rt, "logs", id).CombinedOutput(); lerr == nil {
@@ -147,6 +162,11 @@ func publishedPort(t *testing.T, rt, id string) int {
 			}
 		}
 		if time.Now().After(deadline) {
+			// A 404 here means the container is already gone, which almost
+			// always means its boot script failed. Surface that, not the 404.
+			if logs, lerr := exec.Command(rt, "logs", id).CombinedOutput(); lerr == nil && len(logs) > 0 {
+				t.Logf("container logs:\n%s", logs)
+			}
 			t.Fatalf("no published port for container 22 within 30s: %q (err %v)", mapping, err)
 		}
 		time.Sleep(200 * time.Millisecond)
