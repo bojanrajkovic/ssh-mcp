@@ -20,6 +20,17 @@ const (
 	dirMode  = 0o700
 	fileMode = 0o600
 
+	// controlPathMax is the shortest Unix domain socket path limit across
+	// supported platforms: macOS caps them near 104 bytes, Linux near 108.
+	// Using the stricter value keeps a configuration that works on Linux from
+	// failing only on macOS.
+	controlPathMax = 104
+
+	// controlPathHeadroom covers the suffix ssh appends while establishing a
+	// master, before renaming the socket into place. Without it a path that
+	// passes ssh's own check still fails to bind.
+	controlPathHeadroom = 20
+
 	header = `# Managed by ssh-mcp. Do not edit.
 #
 # Stanzas are derived from connection parameters: the same parameters always
@@ -51,12 +62,30 @@ type Entry struct {
 // user's own ssh_config, which is included but never written.
 func Open(dir, userConfig string) (*Store, error) {
 	s := &Store{dir: dir, userConfig: userConfig, now: time.Now}
+	if err := s.checkControlPathFits(); err != nil {
+		return nil, err
+	}
 	for _, d := range []string{dir, s.ControlDir()} {
 		if err := os.MkdirAll(d, dirMode); err != nil {
 			return nil, fmt.Errorf("sshcfg: create %s: %w", d, err)
 		}
 	}
 	return s, nil
+}
+
+// checkControlPathFits rejects a directory whose control sockets could not
+// bind. Identifiers are a fixed width, so the longest possible socket path is
+// known here — which turns a failure that would otherwise surface as an
+// opaque exit status 255 on every command into one clear error at startup.
+func (s *Store) checkControlPathFits() error {
+	longest := len(s.ControlPath(ID(idPrefix + strings.Repeat("f", idHexLen))))
+	if longest+controlPathHeadroom > controlPathMax {
+		return fmt.Errorf(
+			"sshcfg: control sockets under %s would be %d bytes, over the %d-byte limit "+
+				"for Unix domain sockets once ssh appends its suffix; use a shorter directory",
+			s.ControlDir(), longest, controlPathMax-controlPathHeadroom)
+	}
+	return nil
 }
 
 // ConfigPath is the file to pass to ssh and scp with -F.

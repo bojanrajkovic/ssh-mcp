@@ -14,7 +14,7 @@ import (
 
 func newConnector(t *testing.T) (*Connector, *sshcfg.Store) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := sshtest.ShortTempDir(t)
 	store, err := sshcfg.Open(filepath.Join(dir, "ssh-mcp"), filepath.Join(dir, "ssh", "config"))
 	if err != nil {
 		t.Fatalf("Open store: %v", err)

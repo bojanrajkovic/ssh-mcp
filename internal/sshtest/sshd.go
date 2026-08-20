@@ -187,6 +187,22 @@ func findBinary(name string, candidates ...string) string {
 	return ""
 }
 
+// ShortTempDir returns a temporary directory with a deliberately short path,
+// cleaned up with the test.
+//
+// t.TempDir is unusable for anything holding a Unix domain socket: on macOS it
+// sits under /var/folders/<random>/T/<test name>/, which overruns the ~104
+// byte socket path limit before ssh even appends its suffix.
+func ShortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "sshmcp") //nolint:usetesting // that is the entire point
+	if err != nil {
+		t.Fatalf("create short temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // Keygen writes an ed25519 keypair at path, with no passphrase.
 func Keygen(t *testing.T, path string) {
 	t.Helper()

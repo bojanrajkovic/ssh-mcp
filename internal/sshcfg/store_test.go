@@ -13,9 +13,22 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+// shortTempDir is needed because t.TempDir on macOS sits under
+// /var/folders/<random>/T/<test name>/, which overruns the Unix domain socket
+// path limit that control sockets are subject to.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "sshcfg") //nolint:usetesting // t.TempDir is too long for a socket path
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func newStore(t *testing.T) *Store {
 	t.Helper()
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	s, err := Open(filepath.Join(dir, "ssh-mcp"), filepath.Join(dir, "ssh", "config"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -236,6 +249,20 @@ func TestResolveMatchesWhatWasRendered(t *testing.T) {
 	kh := First(resolved, "userknownhostsfile")
 	if !strings.HasPrefix(kh, s.KnownHostsPath()) {
 		t.Errorf("userknownhostsfile = %q, want it to start with %q", kh, s.KnownHostsPath())
+	}
+}
+
+// A directory too deep for control sockets has to fail here, with a message
+// naming the limit. Left unchecked it surfaces as exit status 255 on every
+// single command, which says nothing about the cause.
+func TestOpenRejectsADirectoryTooDeepForSockets(t *testing.T) {
+	deep := filepath.Join(shortTempDir(t), strings.Repeat("d", 120))
+	_, err := Open(deep, filepath.Join(deep, "config"))
+	if err == nil {
+		t.Fatal("Open accepted a directory too deep for control sockets")
+	}
+	if !strings.Contains(err.Error(), "Unix domain sockets") {
+		t.Errorf("error %q does not explain the socket path limit", err)
 	}
 }
 

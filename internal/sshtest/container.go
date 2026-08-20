@@ -3,7 +3,6 @@ package sshtest
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -124,12 +123,7 @@ func StartContainer(t *testing.T, img Image) *Server {
 
 	port := publishedPort(t, rt, id)
 
-	// Deliberately not t.TempDir: see SocketDir on the length limit.
-	sockDir, err := os.MkdirTemp("/tmp", "sshmcp") //nolint:usetesting // t.TempDir overruns the socket path limit on macOS
-	if err != nil {
-		t.Fatalf("create socket dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockDir := ShortTempDir(t)
 
 	srv := &Server{
 		Port:       port,

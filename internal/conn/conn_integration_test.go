@@ -15,7 +15,7 @@ import (
 
 func integrationConnector(t *testing.T) (*Connector, *sshcfg.Store, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := sshtest.ShortTempDir(t)
 	userConfig := filepath.Join(dir, "ssh", "config")
 	store, err := sshcfg.Open(filepath.Join(dir, "ssh-mcp"), userConfig)
 	if err != nil {
