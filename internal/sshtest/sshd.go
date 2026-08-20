@@ -21,7 +21,12 @@ type Server struct {
 	Key        string // client private key path
 	KnownHosts string // pre-seeded with the server's host key
 	Dir        string
-	Port       int
+	// SocketDir is a deliberately short path for ControlPath sockets. Unix
+	// domain socket paths are capped near 104 bytes on macOS, and t.TempDir
+	// there sits under /var/folders/<random>/T/<test name>/, which overruns
+	// it once ssh appends its own suffix during master setup.
+	SocketDir string
+	Port      int
 }
 
 // Addr returns the host:port the server listens on.
@@ -90,11 +95,25 @@ Subsystem sftp %s
 
 	waitForPort(t, port, logPath)
 
+	// Deliberately not t.TempDir: see SocketDir on the length limit.
+	sockDir, err := os.MkdirTemp("/tmp", "sshmcp") //nolint:usetesting // t.TempDir overruns the socket path limit on macOS
+	if err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+
 	user := os.Getenv("USER")
 	if user == "" {
 		user = os.Getenv("LOGNAME")
 	}
-	return &Server{Port: port, User: user, Key: clientKey, KnownHosts: knownHosts, Dir: dir}
+	return &Server{
+		Port:       port,
+		User:       user,
+		Key:        clientKey,
+		KnownHosts: knownHosts,
+		Dir:        dir,
+		SocketDir:  sockDir,
+	}
 }
 
 func readFile(t *testing.T, path string) []byte {

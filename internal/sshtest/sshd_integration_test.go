@@ -15,7 +15,7 @@ import (
 // socket reuses one connection. Everything in the design rests on this.
 func TestHarnessAcceptsKeyAndMultiplexes(t *testing.T) {
 	srv := Start(t)
-	sock := srv.Dir + "/cm"
+	sock := srv.SocketDir + "/cm"
 
 	base := []string{
 		"-F", "/dev/null",
