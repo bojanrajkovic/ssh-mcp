@@ -49,9 +49,9 @@ func TestClassify(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := classify(tc.stderr)
+			got := Classify(tc.stderr)
 			if !errors.Is(got, tc.want) {
-				t.Errorf("classify(%q) = %v, want %v", tc.stderr, got, tc.want)
+				t.Errorf("Classify(%q) = %v, want %v", tc.stderr, got, tc.want)
 			}
 		})
 	}
@@ -62,7 +62,7 @@ func TestClassify(t *testing.T) {
 // problem.
 func TestClassifyPrefersChangedHostKeyOverAuth(t *testing.T) {
 	stderr := "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed."
-	if got := classify(stderr); !errors.Is(got, ErrHostKeyChanged) {
+	if got := Classify(stderr); !errors.Is(got, ErrHostKeyChanged) {
 		t.Errorf("classify = %v, want ErrHostKeyChanged", got)
 	}
 }

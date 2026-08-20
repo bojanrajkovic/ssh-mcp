@@ -39,7 +39,10 @@ func InstallFakeSSH(t *testing.T, replies ...Reply) *FakeSSH {
 
 	var arms strings.Builder
 	for _, r := range replies {
-		pattern := "*" + r.Match + "*"
+		// The literal part is quoted and the wildcards are not, so a Match
+		// containing a space stays one word. Unquoted, `*-O check*` is two
+		// words and the case statement is a syntax error.
+		pattern := "*" + shellQuote(r.Match) + "*"
 		if r.Match == "" {
 			pattern = "*"
 		}

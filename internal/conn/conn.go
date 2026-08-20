@@ -148,7 +148,7 @@ func (c *Connector) run(ctx context.Context, args ...string) (result, error) {
 // sentinelFor picks the error to wrap. An unmatched failure still gets an
 // error, just an unclassified one.
 func sentinelFor(stderr string, code int) error {
-	if e := classify(stderr); e != nil {
+	if e := Classify(stderr); e != nil {
 		return e
 	}
 	return fmt.Errorf("ssh exited %d", code)

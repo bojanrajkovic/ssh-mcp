@@ -66,9 +66,11 @@ var signatures = []struct {
 	}},
 }
 
-// classify maps ssh's stderr onto a sentinel, or returns nil when nothing
-// matches and the caller should report the raw failure.
-func classify(stderr string) error {
+// Classify maps ssh's stderr onto a sentinel, or returns nil when nothing
+// matches and the caller should report the raw failure. Every package that
+// shells out to ssh shares it, so a diagnostic means the same thing whether it
+// came from a connect, an exec, or a transfer.
+func Classify(stderr string) error {
 	for _, sig := range signatures {
 		for _, phrase := range sig.phrases {
 			if strings.Contains(stderr, phrase) {
