@@ -1,0 +1,166 @@
+// Package sshtest starts a throwaway sshd for integration tests.
+//
+// The server runs unprivileged on a loopback high port with generated keys in
+// a temp directory, so tests exercise real OpenSSH behaviour — multiplexing,
+// host key policy, scp — without a container runtime or any privileged setup.
+package sshtest
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// Server is a running sshd and the client material needed to reach it.
+type Server struct {
+	User       string
+	Key        string // client private key path
+	KnownHosts string // pre-seeded with the server's host key
+	Dir        string
+	Port       int
+}
+
+// Addr returns the host:port the server listens on.
+func (s *Server) Addr() string { return net.JoinHostPort("127.0.0.1", fmt.Sprint(s.Port)) }
+
+// Start brings up sshd and registers cleanup. It skips the test when sshd is
+// not installed, and fails when it is installed but will not start.
+func Start(t *testing.T) *Server {
+	t.Helper()
+
+	sshd := findBinary("sshd", "/usr/sbin/sshd", "/usr/bin/sshd", "/usr/libexec/sshd")
+	if sshd == "" {
+		t.Skip("sshd not installed")
+	}
+	sftp := findBinary("sftp-server",
+		"/usr/libexec/openssh/sftp-server",
+		"/usr/lib/openssh/sftp-server",
+		"/usr/libexec/sftp-server")
+	if sftp == "" {
+		t.Skip("sftp-server not found; scp needs it")
+	}
+
+	dir := t.TempDir()
+	hostKey := filepath.Join(dir, "host_key")
+	clientKey := filepath.Join(dir, "client_key")
+	keygen(t, hostKey)
+	keygen(t, clientKey)
+
+	authorized := filepath.Join(dir, "authorized_keys")
+	writeFile(t, authorized, readFile(t, clientKey+".pub"))
+
+	port := freePort(t)
+	knownHosts := filepath.Join(dir, "known_hosts")
+	entry := fmt.Sprintf("[127.0.0.1]:%d %s", port, readFile(t, hostKey+".pub"))
+	writeFile(t, knownHosts, []byte(entry))
+
+	cfg := filepath.Join(dir, "sshd_config")
+	conf := fmt.Sprintf(`Port %d
+ListenAddress 127.0.0.1
+HostKey %s
+AuthorizedKeysFile %s
+PidFile %s
+StrictModes no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+Subsystem sftp %s
+`, port, hostKey, authorized, filepath.Join(dir, "sshd.pid"), sftp)
+	writeFile(t, cfg, []byte(conf))
+
+	logPath := filepath.Join(dir, "sshd.log")
+	cmd := exec.Command(sshd, "-D", "-f", cfg, "-E", logPath)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sshd: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		if t.Failed() {
+			if out, err := os.ReadFile(logPath); err == nil {
+				t.Logf("sshd log:\n%s", out)
+			}
+		}
+	})
+
+	waitForPort(t, port, logPath)
+
+	user := os.Getenv("USER")
+	if user == "" {
+		user = os.Getenv("LOGNAME")
+	}
+	return &Server{Port: port, User: user, Key: clientKey, KnownHosts: knownHosts, Dir: dir}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
+}
+
+func writeFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func findBinary(name string, candidates ...string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+func keygen(t *testing.T, path string) {
+	t.Helper()
+	cmd := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-f", path, "-N", "")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen %s: %v\n%s", path, err, out)
+	}
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T, want *net.TCPAddr", l.Addr())
+	}
+	return addr.Port
+}
+
+func waitForPort(t *testing.T, port int, logPath string) {
+	t.Helper()
+	addr := net.JoinHostPort("127.0.0.1", fmt.Sprint(port))
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if out, err := os.ReadFile(logPath); err == nil {
+		t.Logf("sshd log:\n%s", out)
+	}
+	t.Fatalf("sshd did not listen on %s within 10s", addr)
+}

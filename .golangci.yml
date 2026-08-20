@@ -1,0 +1,118 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    # Error handling
+    - errcheck
+    - errorlint
+    - nilerr
+
+    # Correctness
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - exhaustive
+
+    # Style
+    - unconvert
+    - revive
+    - misspell
+    - gocritic
+
+    # Complexity
+    - gocyclo
+
+    # Security
+    - gosec
+
+    # Project rules
+    - forbidigo
+    - depguard
+
+    # Tests
+    - usetesting
+
+  settings:
+    gocyclo:
+      min-complexity: 15
+
+    errcheck:
+      check-type-assertions: true
+
+    govet:
+      enable-all: true
+      disable:
+        # Struct layout churns on every field edit and buys nothing here:
+        # no hot loops, no large slices of structs.
+        - fieldalignment
+
+    revive:
+      rules:
+        - name: var-naming
+          disabled: true
+
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    # stdout is the MCP wire. Anything written there that is not a JSON-RPC
+    # frame corrupts the protocol, and the failure looks like a client bug.
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^fmt\.Print(|f|ln)$'
+          msg: "stdout is the MCP wire — use slog to stderr"
+        - pattern: '^print(|ln)$'
+          msg: "stdout is the MCP wire — use slog to stderr"
+        - pattern: '^os\.Stdout$'
+          msg: "only the transport may touch stdout — use slog to stderr"
+
+    # The dependency budget, enforced at the import site: the MCP SDK in
+    # production code, plus go-cmp in tests. Everything else is stdlib.
+    depguard:
+      rules:
+        main:
+          files:
+            - "$all"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/bojanrajkovic/ssh-mcp
+            - github.com/modelcontextprotocol/go-sdk
+        tests:
+          files:
+            - "$test"
+          allow:
+            - $gostd
+            - github.com/bojanrajkovic/ssh-mcp
+            - github.com/modelcontextprotocol/go-sdk
+            - github.com/google/go-cmp
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - errcheck
+          - gosec
+      # main() hands the real stdout to the MCP transport, then reassigns the
+      # global so stray writes land on stderr instead of the wire.
+      - path: cmd/ssh-mcp/main\.go
+        linters:
+          - forbidigo
+      # The sshd harness exists to spawn processes with computed arguments.
+      - path: internal/sshtest/
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofumpt
+  settings:
+    gofumpt:
+      extra-rules: true

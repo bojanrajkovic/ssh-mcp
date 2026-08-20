@@ -1,0 +1,37 @@
+version: 2
+
+project_name: ssh-mcp
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: ssh-mcp
+    main: ./cmd/ssh-mcp
+    binary: ssh-mcp
+    env:
+      - CGO_ENABLED=0
+    # No windows: ControlMaster sockets do not exist there.
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/bojanrajkovic/ssh-mcp/internal/version.Version={{.Version}}
+      - -X github.com/bojanrajkovic/ssh-mcp/internal/version.Commit={{.Commit}}
+      - -X github.com/bojanrajkovic/ssh-mcp/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true # release-please owns CHANGELOG.md

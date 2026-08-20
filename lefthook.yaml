@@ -1,0 +1,26 @@
+# Hooks stay fast so they do not get bypassed. Full lint, vet, and tests run in
+# CI, where a slow check costs nobody's attention.
+pre-commit:
+  parallel: true
+  commands:
+    gofumpt:
+      glob: "*.go"
+      run: gofumpt -l -w -extra {staged_files}
+      stage_fixed: true
+
+    build:
+      glob: "*.go"
+      run: go build ./...
+
+commit-msg:
+  commands:
+    conventional-commits:
+      run: |
+        message=$(cat {1})
+        if ! echo "$message" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|chore|build|ci)(\(.+\))?!?: .'; then
+          echo "Commit message must follow conventional commits:"
+          echo "  type(scope): description"
+          echo ""
+          echo "Types: feat, fix, docs, style, refactor, perf, test, chore, build, ci"
+          exit 1
+        fi
