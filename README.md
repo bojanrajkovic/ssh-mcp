@@ -102,6 +102,7 @@ Individual tasks:
 | `mise run test-integration` | Tests against a real sshd (needs `sshd` installed) |
 | `mise run vuln` | govulncheck over dependencies and stdlib |
 | `mise run build` | Build `./ssh-mcp` with version stamped |
+| `mise run dist` | Cross-compile linux and darwin binaries into `dist/` |
 
 Install the git hooks with `lefthook install`. They run gofumpt on staged files
 and check commit message format; full lint and tests are CI's job.

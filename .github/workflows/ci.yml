@@ -98,3 +98,13 @@ jobs:
         with:
           version: latest
           args: build --snapshot --clean
+
+      # Without this the cross-compile is verified and then discarded, so
+      # there is no way to try a macOS build without cutting a release.
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-mcp-snapshot-${{ github.sha }}
+          path: dist/*/ssh-mcp
+          retention-days: 14
+          if-no-files-found: error
