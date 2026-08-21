@@ -24,6 +24,27 @@ builds:
       - -X github.com/bojanrajkovic/ssh-mcp/internal/version.Commit={{.Commit}}
       - -X github.com/bojanrajkovic/ssh-mcp/internal/version.Date={{.Date}}
 
+# macOS binaries are signed with a Developer ID certificate and notarized by
+# Apple, so Gatekeeper does not quarantine a downloaded copy. goreleaser does
+# both without a macOS runner, so the release stays on one Linux job.
+#
+# Every field is templated from the environment and the whole block is gated on
+# the certificate being present, so a fork or a repository without the secrets
+# still produces working — just unsigned — binaries rather than failing.
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids: [ssh-mcp]
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 30m
+
 archives:
   - id: default
     formats: [tar.gz]

@@ -3,6 +3,7 @@ go = "1.26"
 "aqua:golangci/golangci-lint" = "2.10.1"
 "aqua:mvdan/gofumpt" = "0.9.2"
 "aqua:goreleaser/goreleaser" = "2.14.1"
+"aqua:zizmorcore/zizmor" = "1.29.0"
 "go:golang.org/x/tools/gopls" = "latest"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
 lefthook = "1.11.5"
@@ -44,6 +45,12 @@ run = "go test -race -count=1 -tags=integration ./..."
 [tasks.dist]
 description = "Cross-compile release binaries into dist/ without publishing"
 run = "goreleaser build --snapshot --clean"
+
+[tasks.audit]
+description = "Audit GitHub Actions workflows with zizmor"
+# The auditor persona accepts false positives in exchange for missing nothing.
+# Online audits need a token; locally `gh auth token` supplies one.
+run = "zizmor --persona=auditor .github/workflows/"
 
 [tasks.vuln]
 description = "Scan dependencies and stdlib for known vulnerabilities"

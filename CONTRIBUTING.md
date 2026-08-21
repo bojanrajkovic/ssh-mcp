@@ -43,6 +43,46 @@ confusing client-side error rather than anything pointing at the real cause.
 protocol. `forbidigo` blocks `fmt.Print*`, `println`, and `os.Stdout` outside
 that one file. Log with `slog`, which is already pointed at stderr.
 
+## Workflow security
+
+`mise run audit` runs [zizmor](https://docs.zizmor.sh) over `.github/workflows/`
+with the `auditor` persona, which accepts false positives in exchange for
+missing nothing. CI gates on it. Online audits resolve action references
+against the GitHub API, so a token is needed: locally `gh auth token` supplies
+one, and CI passes `GITHUB_TOKEN`.
+
+Actions are pinned to commit hashes with the version in a trailing comment.
+Renovate updates both. `zizmor --fix=all` does the pinning automatically if you
+add an action by tag.
+
+## Releases and signing
+
+Releases are automated: release-please opens a version PR, merging it tags, and
+goreleaser publishes on the tag.
+
+macOS binaries are signed with a Developer ID certificate and notarized by
+Apple, which goreleaser does without a macOS runner. The credentials live on
+the `release` GitHub environment, restricted to `main`, so no other job can read
+them:
+
+| Secret | What it is |
+|--------|------------|
+| `MACOS_SIGN_P12` | base64 of the Developer ID Application `.p12` |
+| `MACOS_SIGN_PASSWORD` | password for that `.p12` |
+| `MACOS_NOTARY_KEY` | contents of the App Store Connect API key `.p8` |
+| `MACOS_NOTARY_KEY_ID` | the key's ID |
+| `MACOS_NOTARY_ISSUER_ID` | the issuer UUID from App Store Connect |
+
+The whole block is gated on `MACOS_SIGN_P12` being present, so a fork without
+the secrets still builds — just unsigned.
+
+Every archive gets a [build provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations),
+which ties it to this workflow, commit, and runner. Verify a download with:
+
+```bash
+gh attestation verify ssh-mcp_0.1.0_darwin_arm64.tar.gz --repo bojanrajkovic/ssh-mcp
+```
+
 ## Tests
 
 Four layers, in descending order of how much of the suite lives there:
