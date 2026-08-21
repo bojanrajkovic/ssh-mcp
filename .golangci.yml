@@ -84,6 +84,10 @@ linters:
             - $gostd
             - github.com/bojanrajkovic/ssh-mcp
             - github.com/modelcontextprotocol/go-sdk
+            # Schema inference for the tool surface. Already in the module
+            # graph via the MCP SDK; taken directly so tool inputs can forbid
+            # unknown properties rather than silently ignoring them.
+            - github.com/google/jsonschema-go
         tests:
           files:
             - "$test"
@@ -91,6 +95,7 @@ linters:
             - $gostd
             - github.com/bojanrajkovic/ssh-mcp
             - github.com/modelcontextprotocol/go-sdk
+            - github.com/google/jsonschema-go
             - github.com/google/go-cmp
 
   exclusions:

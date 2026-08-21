@@ -20,8 +20,13 @@ goreleaser publishes the binaries. Do not edit the changelog or version by hand.
 
 ## The dependency budget
 
-**Production code may import the standard library and the MCP SDK. Nothing
-else.** Test code may additionally import `go-cmp`.
+**Production code may import the standard library, the MCP SDK, and
+`jsonschema-go`. Nothing else.** Test code may additionally import `go-cmp`.
+
+`jsonschema-go` is already in the module graph via the MCP SDK. It is taken
+directly so tool input schemas can forbid unknown properties: without that,
+JSON Schema accepts extra keys, and a caller passing `ProxyCommand` to
+`ssh_connect` would have it silently ignored rather than refused.
 
 This is enforced by `depguard` in `.golangci.yml`, so a disallowed import fails
 lint at the import site. Widening the budget is a deliberate change to that

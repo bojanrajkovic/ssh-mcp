@@ -7,10 +7,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"syscall"
 
+	"github.com/bojanrajkovic/ssh-mcp/internal/conn"
+	"github.com/bojanrajkovic/ssh-mcp/internal/exec"
+	"github.com/bojanrajkovic/ssh-mcp/internal/jobs"
 	"github.com/bojanrajkovic/ssh-mcp/internal/server"
+	"github.com/bojanrajkovic/ssh-mcp/internal/sshcfg"
 	"github.com/bojanrajkovic/ssh-mcp/internal/version"
+	"github.com/bojanrajkovic/ssh-mcp/internal/xfer"
 )
 
 func main() {
@@ -31,14 +38,92 @@ func run() int {
 	os.Stdout = os.Stderr
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	slog.Info("starting", "version", version.Version, "commit", version.Commit)
+
+	deps, err := build()
+	if err != nil {
+		slog.Error("startup failed", "error", err)
+		return 1
+	}
+	slog.Info("starting", "version", version.Version, "config", deps.Store.ConfigPath())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := server.Run(ctx, stdin, stdout); err != nil {
+	if err := server.New(deps).Run(ctx, stdin, stdout); err != nil {
 		slog.Error("server exited", "error", err)
 		return 1
 	}
 	return 0
+}
+
+// build assembles the server's collaborators.
+//
+// Configuration is environment variables only. An MCP client's own config file
+// already carries an env block, so that is where a user sets these; a second
+// configuration file would only compete with it.
+func build() (server.Deps, error) {
+	configDir, err := dir("SSH_MCP_CONFIG_DIR", os.UserConfigDir, "ssh-mcp")
+	if err != nil {
+		return server.Deps{}, err
+	}
+	spillDir, err := dir("SSH_MCP_SPILL_DIR", os.UserCacheDir, "ssh-mcp", "spill")
+	if err != nil {
+		return server.Deps{}, err
+	}
+
+	userConfig, err := userSSHConfig()
+	if err != nil {
+		return server.Deps{}, err
+	}
+
+	store, err := sshcfg.Open(configDir, userConfig)
+	if err != nil {
+		return server.Deps{}, err
+	}
+
+	spillBytes := 0
+	if raw := os.Getenv("SSH_MCP_SPILL_BYTES"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return server.Deps{}, fmt.Errorf("SSH_MCP_SPILL_BYTES is not a number: %q", raw)
+		}
+		spillBytes = parsed
+	}
+
+	spill := exec.NewSpiller(spillDir, spillBytes)
+	connector := conn.New(store)
+	executor := exec.New(connector, store, spill)
+
+	return server.Deps{
+		Store: store,
+		Conn:  connector,
+		Exec:  executor,
+		Xfer:  xfer.New(store, executor),
+		Jobs:  jobs.New(executor),
+		Spill: spill,
+	}, nil
+}
+
+// userSSHConfig locates the config that gets included but never written.
+func userSSHConfig() (string, error) {
+	if v := os.Getenv("SSH_MCP_SSH_CONFIG"); v != "" {
+		return v, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home directory: %w", err)
+	}
+	return filepath.Join(home, ".ssh", "config"), nil
+}
+
+// dir resolves an overridable directory, falling back to an XDG base.
+func dir(env string, base func() (string, error), parts ...string) (string, error) {
+	if v := os.Getenv(env); v != "" {
+		return v, nil
+	}
+	root, err := base()
+	if err != nil {
+		return "", fmt.Errorf("locate directory for %s: %w", env, err)
+	}
+	return filepath.Join(append([]string{root}, parts...)...), nil
 }

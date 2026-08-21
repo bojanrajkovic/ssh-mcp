@@ -12,9 +12,10 @@ the failure looks like a client bug. `main` reassigns `os.Stdout` to stderr
 after handing the real handle to the transport, and `forbidigo` blocks
 `fmt.Print*`, `println`, and `os.Stdout` everywhere else. Log with `slog`.
 
-**The dependency budget is one production dependency:** the MCP SDK. Tests may
-also use `go-cmp`. `depguard` enforces this — if you need something else, that
-is a config change to argue for, not an incidental `go get`.
+**The dependency budget is two production dependencies:** the MCP SDK and
+`jsonschema-go`. Tests may also use `go-cmp`. `depguard` enforces this — if you
+need something else, that is a config change to argue for, not an incidental
+`go get`.
 
 **Do not reimplement OpenSSH.** Connection state lives in an ssh_config stanza,
 liveness in the control socket, job state on the remote filesystem. If you are
@@ -32,6 +33,7 @@ OpenSSH or the remote host already tracks it.
 | `internal/exec` | Synchronous execution and the output spill policy |
 | `internal/xfer` | scp transfers plus content-shaped file read and write |
 | `internal/jobs` | Detached remote jobs: start, status, wait, sweep |
+| `internal/channel` | Claude Code channel push: transport wrapper, notifications |
 | `internal/version` | Link-time build stamp |
 | `internal/sshtest` | Throwaway sshd for integration tests |
 
