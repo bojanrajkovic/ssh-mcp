@@ -73,6 +73,23 @@ them:
 | `MACOS_NOTARY_KEY_ID` | the key's ID |
 | `MACOS_NOTARY_ISSUER_ID` | the issuer UUID from App Store Connect |
 
+`tools/setup-secrets.sh` sets all five. Values may be 1Password references,
+file paths, or literals, and are piped to `gh` on stdin so they never reach the
+process table:
+
+```bash
+tools/setup-secrets.sh \
+  --cert 'op://Private/Developer ID/certificate' \
+  --cert-password 'op://Private/Developer ID/password' \
+  --notary-key 'op://Private/ASC Key/private key' \
+  --notary-key-id ABC123DEF4 --notary-issuer-id 12345678-90ab-...
+```
+
+`--find` lists 1Password items that look like signing credentials, and
+`--dry-run` validates without uploading. The script refuses anything that is
+not a **Developer ID Application** certificate: other kinds import and sign
+happily, then fail at notarization with an error that says nothing useful.
+
 The whole block is gated on `MACOS_SIGN_P12` being present, so a fork without
 the secrets still builds — just unsigned.
 
