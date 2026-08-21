@@ -21,8 +21,8 @@ type Image struct {
 	Install string // shell fragment that installs sshd, run before start
 }
 
-// Alpine is busybox userland with an ash shell, the harshest common case for
-// anything the server runs remotely.
+// Alpine is busybox userland with an ash shell, the most restrictive common
+// case for anything the server runs remotely.
 var Alpine = Image{
 	Name:    "alpine:3",
 	Install: "apk add --no-cache openssh-server openssh-sftp-server >/dev/null",
@@ -62,8 +62,8 @@ func Runtime(t *testing.T) string {
 
 // StartContainer runs sshd from img in a container and returns a Server
 // reaching it, with cleanup registered. Unlike Start, the remote filesystem is
-// genuinely separate from the host's, so a transfer test cannot pass by
-// accidentally reading and writing the same file.
+// separate from the host's, so a transfer test cannot pass by reading and
+// writing the same file.
 func StartContainer(t *testing.T, img Image) *Server {
 	t.Helper()
 	rt := Runtime(t)
@@ -92,12 +92,10 @@ func StartContainer(t *testing.T, img Image) *Server {
 		"exec /usr/sbin/sshd -D -e",
 	}, "\n")
 
-	// Output, not CombinedOutput: `run -d` writes image pull progress to
-	// stderr and the container ID to stdout. Merging them yields an ID with
-	// pull chatter glued to it, which only breaks on a cold image cache.
-	//
-	// No --rm either: a container whose boot script fails must survive long
-	// enough for cleanup to read its logs.
+	// Output, not CombinedOutput: `run -d` writes pull progress to stderr and
+	// the container ID to stdout, and merging them corrupts the ID on a cold
+	// image cache. No --rm: a container whose boot script fails must survive
+	// long enough for cleanup to read its logs.
 	var stderr strings.Builder
 	cmd := exec.Command(rt, "run", "-d",
 		"-p", "127.0.0.1::22",

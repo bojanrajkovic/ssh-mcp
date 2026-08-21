@@ -44,7 +44,7 @@ type Status struct {
 //
 // The master is established by running a trivial remote command rather than by
 // starting a bare master with -N, so a successful Connect means authentication
-// worked and the remote will actually run commands.
+// worked and the remote runs commands.
 func (c *Connector) Connect(ctx context.Context, o sshcfg.Options) (sshcfg.ID, error) {
 	id, err := c.store.Ensure(o)
 	if err != nil {

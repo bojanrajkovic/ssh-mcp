@@ -42,12 +42,11 @@ Anything built on push alone would be undebuggable from the far end.
 
 The Go SDK has no server-to-client custom notification, so the transport is
 wrapped to keep the connection and write the frame directly. That uses exported
-extension points rather than a fork, but it is a place the SDK could change
-underneath.
+extension points rather than a fork, but an SDK release could change them.
 
 Meta keys are validated before sending. They become XML attribute names on the
-channel tag, and the client discards anything that is not a bare identifier
-without a word, so `job-id` would simply never appear.
+channel tag, and the client silently discards any key that is not a bare
+identifier, so `job-id` would never appear.
 
 Watching a job costs one goroutine bounded by the server's lifetime. It is the
 only background work the server does.

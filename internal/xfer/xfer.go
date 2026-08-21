@@ -1,10 +1,9 @@
 // Package xfer moves files over an established connection.
 //
-// Two shapes are offered because callers want two different things. A copy is
-// path-shaped: it moves bytes between filesystems and is what large or binary
-// files need. A read or write is content-shaped: it puts a file's text in the
-// caller's hands directly, which is what "show me this config" actually means
-// and which a copy would turn into two steps.
+// Two shapes are offered. A copy is path-shaped: it moves bytes between
+// filesystems, which large or binary files need. A read or write is
+// content-shaped: it returns or accepts the file's text directly, so showing
+// or replacing a config file is one step rather than a copy and a local read.
 package xfer
 
 import (

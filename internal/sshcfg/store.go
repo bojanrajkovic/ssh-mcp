@@ -155,7 +155,7 @@ func First(resolved map[string][]string, key string) string {
 	return ""
 }
 
-// Resolve asks ssh what it actually resolved for id, using OpenSSH's own
+// Resolve asks ssh what it resolved for id, using OpenSSH's own
 // parser rather than re-reading the file. Keys are lowercase, as ssh -G emits
 // them, and values are slices because ssh repeats cumulative keywords such as
 // IdentityFile rather than collapsing them.

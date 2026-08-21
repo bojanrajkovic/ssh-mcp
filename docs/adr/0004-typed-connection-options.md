@@ -35,15 +35,15 @@ rendering.
 Local command execution is unrepresentable rather than merely discouraged. No
 caller-supplied value reaches a local shell.
 
-The validation is as load-bearing as the type. Rendering writes one keyword per
+The validation matters as much as the type. Rendering writes one keyword per
 line, so a `Host` of `example.com\n    ProxyCommand touch /tmp/x` would emit a
 valid `ProxyCommand` line and defeat the entire decision. Rejecting control
-characters closes that, and rejecting quotes and backslashes keeps values from
+characters closes that. Rejecting quotes and backslashes keeps values from
 escaping the quoting that fields with spaces require.
 
-A denylist was rejected as the losing side of this. Four vectors exist today
-and OpenSSH can add a fifth in any release, at which point a denylist is
-quietly wrong and nothing signals it.
+A denylist does not work here. Four vectors exist today, and OpenSSH can add a
+fifth in any release. The denylist would then be incomplete, and nothing would
+report it.
 
 `ProxyJump` covers bastions, which is the legitimate reason to reach for
 `ProxyCommand`. Chains work, since it accepts ssh's own comma-separated syntax.

@@ -40,13 +40,32 @@ socket outlives the server process, so a restart mid-task loses nothing, and
 `ssh -O check` and `ssh -O exit` provide liveness and teardown without a
 session registry.
 
-`scp` rides the same socket for free, so file transfer needs no separate
-connection or authentication path.
+```mermaid
+sequenceDiagram
+    participant S as ssh-mcp
+    participant M as control socket
+    participant R as remote sshd
 
-The cost is exit-code fidelity. `ssh` exits 255 for its own transport failures,
-which collides with a remote command that genuinely exits 255. The server
-disambiguates by running `ssh -O check` against the socket: a live master means
-the remote command really returned 255, a dead one means the transport failed.
+    S->>M: ssh -F config conn_x true
+    M->>R: authenticate once
+    S->>M: ssh -F config conn_x <command>
+    M->>R: reuse the session
+    S->>M: scp -F config file conn_x:path
+    M->>R: reuse the session
+    Note over S: server exits and restarts
+    S->>M: ssh -O check conn_x
+    M-->>S: master running
+    S->>M: ssh -F config conn_x <command>
+    M->>R: reuse the session
+```
+
+`scp` uses the same socket, so file transfer needs no second connection and no
+second authentication.
+
+The cost is an ambiguous exit code. `ssh` exits 255 for its own transport
+failures, and a remote command can also exit 255. The server tells the two
+apart by running `ssh -O check` against the socket: a live master means the
+remote command returned 255, a dead one means the transport failed.
 
 Output arrives as bytes from a subprocess rather than as a structured result,
 so stdout and stderr separation depends on how the subprocess is wired rather

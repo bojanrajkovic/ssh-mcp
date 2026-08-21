@@ -2,15 +2,12 @@
 //
 // A channel is a Claude Code extension to MCP: the server declares an
 // experimental capability and emits a notification the client injects into the
-// model's context. The Go SDK has no server-to-client custom notification —
-// AddSendingCustomMethod takes a *Client, and ServerSession offers only the
-// standard set — so this wraps a transport, keeps the Connection it returns,
-// and writes the frame itself. Connection.Write is documented as safe for
-// concurrent use, so this uses exported extension points rather than forking.
+// model's context. The Go SDK has no server-to-client custom notification, so
+// this wraps a transport, keeps the Connection it returns, and writes the frame
+// itself through Connection.Write, which is safe for concurrent use.
 //
-// Delivery is best effort by design. A session started without the channel
-// flag drops every event and returns no error, so nothing here may be
-// load-bearing: it is a convenience over polling, never the mechanism.
+// Delivery is best effort. A session started without the channel flag drops
+// every event and returns no error, so nothing may depend on an event arriving.
 package channel
 
 import (
@@ -96,9 +93,9 @@ func (t *Transport) Push(ctx context.Context, content string, meta map[string]st
 
 // validateMeta rejects keys the client would silently discard.
 //
-// Meta keys become XML attribute names on the channel tag, so anything that is
-// not a bare identifier is dropped without a word. Failing here turns an
-// attribute that mysteriously never arrives into an error at the call site.
+// Meta keys become XML attribute names on the channel tag, and the client
+// silently drops any key that is not a bare identifier. Failing here turns a
+// missing attribute into an error at the call site.
 func validateMeta(meta map[string]string) error {
 	for key := range meta {
 		if key == "" {

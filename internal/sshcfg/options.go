@@ -21,7 +21,7 @@ import (
 // Options are the connection settings a caller may set. Each field maps to
 // exactly one ssh_config keyword.
 //
-// There is deliberately no free-form option map. ProxyCommand, LocalCommand,
+// There is no free-form option map. ProxyCommand, LocalCommand,
 // KnownHostsCommand and Match exec all execute commands on the *local*
 // machine, so accepting arbitrary keywords would hand callers local code
 // execution. JumpHost covers bastions, which is the legitimate reason to reach
@@ -68,7 +68,7 @@ const (
 
 // Validate reports whether the options can be rendered safely.
 //
-// The load-bearing check is that no field may contain a newline or any other
+// The check that matters is that no field may contain a newline or any other
 // control character. Without it, a caller could smuggle arbitrary ssh_config
 // keywords into a stanza — a Host of "example.com\n    ProxyCommand touch /tmp/x"
 // would render as a valid ProxyCommand line and defeat the whole point of a

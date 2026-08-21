@@ -113,15 +113,15 @@ Four layers, in descending order of how much of the suite lives there:
    flavours, because they cover different axes:
 
    - `Start` runs an unprivileged sshd on a loopback port with generated keys.
-     Fast, needs no container runtime, and runs on Linux and macOS — so it
-     covers the *client* side, where platform differences bite. The macOS job
-     is what caught the `ControlPath` length limit.
+     Fast, needs no container runtime, and runs on Linux and macOS, so it
+     covers the *client* side, where the platforms differ: the macOS socket
+     path limit, for one.
    - `StartContainer` runs sshd inside a container. This covers the *server*
      side: busybox ash versus bash, images with no `sftp-server`, older
      OpenSSH. It is also the only harness where the remote filesystem is
-     genuinely separate, so a transfer test cannot pass by reading and writing
-     the same file. Linux only, since GitHub's macOS runners have no container
-     runtime.
+     separate from the local one, so a transfer test cannot pass by reading and
+     writing the same file. Linux only, since GitHub's macOS runners have no
+     container runtime.
 
    Container tests skip when no runtime is found. The runtime is resolved by
    binary name — `docker`, then `podman`, then `nerdctl` — so a shell alias

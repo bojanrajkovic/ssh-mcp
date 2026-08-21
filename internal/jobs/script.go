@@ -17,16 +17,12 @@ func rootLoop() string {
 
 // launchScript starts a job detached from the connection that started it.
 //
-// Only the setsid is backgrounded and a foreground command follows it.
-// Backgrounding the whole list instead forks a subshell whose own stdout and
-// stderr are still the SSH channel's, since the redirections bind to setsid
-// rather than to the list; bash then keeps that subshell alive waiting, so ssh
-// blocks until the job finishes and nothing is detached at all. Busybox ash
-// hides the bug by exec-optimising the last command of a list.
-// The command runs inside a subshell. A bare list would bind the redirections
-// to its last command only, and an `exit` anywhere in it would end the job
-// shell before the exit code was ever recorded — leaving a job that runs to
-// completion but never reports finishing.
+// Two shell details keep it detached. Only the setsid command is backgrounded,
+// with `echo started` after it: backgrounding the whole list would leave a
+// subshell holding the SSH channel's stdout and stderr, and bash then waits
+// on it, so ssh never returns. The command runs inside a subshell so the
+// redirections cover all of it and an `exit` inside it cannot skip writing
+// the exit code.
 func launchScript(jobID ID, command string) string {
 	inner := "(\n" + command + "\n) >\"$d/out\" 2>\"$d/err\"\necho $? >\"$d/rc\""
 

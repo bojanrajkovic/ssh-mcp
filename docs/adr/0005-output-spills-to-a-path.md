@@ -14,8 +14,8 @@ all of it to the caller is the single most likely way this server makes an
 agent worse rather than better, because a context window is a fixed budget and
 one unlucky command can consume it.
 
-Truncating is the usual answer, but a truncated stream is a lie the caller
-cannot detect: the interesting line may be exactly the one that was cut.
+Truncating is the usual answer, but the caller cannot detect what was cut, and
+the line that matters may be the one that is missing.
 
 ## Decision
 
@@ -28,6 +28,23 @@ Output that is not valid UTF-8 spills whatever its size.
 Streams are written through a writer that keeps bytes in memory up to the
 budget and switches to a file beyond it.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Memory
+    Memory --> Memory: write, total within budget
+    Memory --> File: write crosses the budget
+    File --> File: write
+    Memory --> Inline: close, valid UTF-8
+    Memory --> Path: close, invalid UTF-8
+    File --> Path: close
+    Inline --> [*]
+    Path --> [*]
+```
+
+`Inline` returns the text. `Path` returns the file path, the byte count, and
+the reason (size or encoding). The first bytes of the stream stay in memory in
+both states.
+
 ## Consequences
 
 Nothing is discarded. The full stream is always on disk when it did not fit,
@@ -38,8 +55,8 @@ There is no elision marker to misread, because there is no partial output. A
 result is either complete or a path, never a fragment that looks complete.
 
 Independent budgets mean a command that floods stdout still returns its error
-message inline, where it will actually be read. That is the common failing
-case, and merging the budgets would hide it behind the noise.
+message inline, where the caller reads it. That is the common failing case,
+and merging the budgets would hide it behind the noise.
 
 Streaming to disk rather than buffering and measuring afterwards is what keeps
 a multi-gigabyte command from being an out-of-memory rather than a slow call.
@@ -52,8 +69,8 @@ Error classification reads ssh's diagnostics from stderr, so the first bytes of
 each stream stay in memory even after it spills. Without that, a noisy command
 would make its own failure unclassifiable.
 
-Spill files accumulate and are swept at startup, since the server is spawned
-per session and a timer would be one more moving part.
+Spill files accumulate. The server sweeps them at startup rather than on a
+timer, because it is spawned per session.
 
 10 kB is roughly 2,500 to 3,000 tokens. It is a configuration value because the
 right number depends on the caller's budget, not on anything intrinsic.

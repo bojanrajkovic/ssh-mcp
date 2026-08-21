@@ -89,8 +89,7 @@ func (e *Executor) Run(ctx context.Context, id sshcfg.ID, req Request) (Result, 
 	}
 
 	// stdout and stderr are captured independently, each with its own budget,
-	// so a command that floods stdout still returns its error message inline
-	// where it will actually be read.
+	// so a command that floods stdout still returns its error message inline.
 	stdout := e.spill.stream("stdout")
 	stderr := e.spill.stream("stderr")
 	cmd.Stdout = stdout
@@ -113,7 +112,8 @@ func (e *Executor) Run(ctx context.Context, id sshcfg.ID, req Request) (Result, 
 	return Result{ExitCode: code, Stdout: outOut, Stderr: errOut}, nil
 }
 
-// exitCode resolves what a run actually meant.
+// exitCode decides whether an exit status came from ssh or from the remote
+// command.
 //
 // ssh reports its own failures as exit status 255, which a remote command is
 // equally free to return. The two are separated by asking whether a control

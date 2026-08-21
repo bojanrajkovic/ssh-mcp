@@ -35,11 +35,28 @@ file before the user's.
 The user's `~/.ssh/config` is never written, and nothing the server creates
 lands in their `~/.ssh` at all.
 
-Ordering is load-bearing. `ssh_config` uses the first value obtained for each
-keyword, so generated stanzas must precede the `Include` or a user's `Host *`
+Ordering matters. `ssh_config` uses the first value obtained for each keyword,
+so generated stanzas must precede the `Include`. Otherwise a user's `Host *`
 block would override settings the server depends on. The whole file is
 re-rendered whenever a stanza is added, so the `Include` cannot drift from the
 end.
+
+```mermaid
+flowchart TB
+    subgraph server["~/.config/ssh-mcp/config  (server-owned, passed with -F)"]
+        direction TB
+        A["Host conn_a1b2c3d4<br/>HostName ...<br/>ControlPath ~/.config/ssh-mcp/cm/conn_a1b2c3d4<br/>UserKnownHostsFile server-file user-file"]
+        B["Host conn_e5f6a7b8<br/>..."]
+        I["Include ~/.ssh/config"]
+        A --> B --> I
+    end
+    I -. "read, never written" .-> U["~/.ssh/config<br/>(user-owned)<br/>Host * ..."]
+    ssh["ssh -F config conn_a1b2c3d4"] --> server
+```
+
+Reading order is top to bottom. The first stanza that matches `conn_a1b2c3d4`
+sets each keyword, and the user's `Host *` block only fills keywords the stanza
+left unset.
 
 Every host the user has defined stays reachable, since their config is included
 rather than replaced.

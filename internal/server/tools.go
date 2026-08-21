@@ -38,11 +38,8 @@ func stream(o exec.Output) Stream {
 }
 
 // addTool registers a tool whose input schema forbids unknown properties.
-//
-// JSON Schema allows extra properties by default, so without this a caller
-// passing ProxyCommand to ssh_connect would have it silently ignored. On a
-// surface whose entire point is a typed allowlist, "quietly did nothing" is
-// the wrong answer: it should be refused and said so.
+// JSON Schema accepts extra keys by default, which would let a caller pass
+// ProxyCommand and have it silently ignored rather than refused.
 func addTool[In, Out any](s *mcp.Server, tool *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) error {
 	schema, err := jsonschema.For[In](nil)
 	if err != nil {
@@ -409,11 +406,9 @@ func parseMode(s string) (fs.FileMode, error) {
 	return fs.FileMode(value), nil
 }
 
-// watchJob pushes a channel event when a job finishes.
-//
-// This is the only reason the server keeps a goroutine at all, and it is
-// deliberately best effort: the event is a convenience over polling, so a
-// failure to deliver is logged and dropped rather than surfaced.
+// watchJob pushes a channel event when a job finishes. Delivery is best
+// effort: a failure is logged and dropped, and the status tools stay
+// authoritative. This is the server's only goroutine.
 func (s *Server) watchJob(id sshcfg.ID, jobID jobs.ID) {
 	if s.channel == nil {
 		return

@@ -27,7 +27,7 @@ type Server struct {
 	// acceptNew relaxes host key checking for servers whose key is not known
 	// before start, which is every containerised server.
 	acceptNew bool
-	// SocketDir is a deliberately short path for ControlPath sockets. Unix
+	// SocketDir is a short path for ControlPath sockets. Unix
 	// domain socket paths are capped near 104 bytes on macOS, and t.TempDir
 	// there sits under /var/folders/<random>/T/<test name>/, which overruns
 	// it once ssh appends its own suffix during master setup.
@@ -187,7 +187,7 @@ func findBinary(name string, candidates ...string) string {
 	return ""
 }
 
-// ShortTempDir returns a temporary directory with a deliberately short path,
+// ShortTempDir returns a temporary directory with a short path,
 // cleaned up with the test.
 //
 // t.TempDir is unusable for anything holding a Unix domain socket: on macOS it

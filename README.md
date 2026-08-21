@@ -39,8 +39,9 @@ mise use -g github:bojanrajkovic/ssh-mcp   # or: go install github.com/bojanrajk
 | `ssh_copy` | Copy a file or directory, either direction. |
 | `ssh_read_file` / `ssh_write_file` | Read or replace a remote file's contents. |
 
-Output larger than the inline budget, or output that is not text, comes back as
-a path to a local file rather than inline — nothing is truncated.
+Each output stream has an inline budget, 10 kB by default. Output over the
+budget, or output that is not text, *spills*: it comes back as a path to a
+local file holding all of it, instead of inline. Nothing is truncated.
 
 Connection options are a fixed set: `user`, `port`, `identity_file`,
 `identity_agent`, `forward_agent`, `jump_host`, `connect_timeout_seconds`, and
