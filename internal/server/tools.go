@@ -84,8 +84,10 @@ func (s *Server) registerTools() error {
 
 	if err := addTool(s.mcp, &mcp.Tool{
 		Name: "ssh_exec_async",
-		Description: "Start a command that keeps running if the connection drops, " +
-			"and return a job id immediately.",
+		Description: "Start a command that keeps running if the connection drops, and return a job " +
+			"id immediately. Retrieve the result with ssh_job_wait, which blocks, or " +
+			"ssh_job_status, which does not. Do not wait for a completion notification: one may " +
+			"never arrive.",
 	}, s.execAsync); err != nil {
 		return err
 	}
