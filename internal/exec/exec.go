@@ -34,6 +34,9 @@ type Request struct {
 	Cwd string
 	// Timeout defaults to DefaultTimeout when zero.
 	Timeout time.Duration
+	// Stdin is fed to the remote command. It carries arbitrary bytes, so a
+	// file can be written by piping into a remote cat.
+	Stdin string
 }
 
 // Result is what a command produced.
@@ -81,6 +84,9 @@ func (e *Executor) Run(ctx context.Context, id sshcfg.ID, req Request) (Result, 
 	cmd := osexec.CommandContext(ctx, "ssh",
 		"-F", e.store.ConfigPath(), string(id), "--", remote)
 	cmd.WaitDelay = waitDelay
+	if req.Stdin != "" {
+		cmd.Stdin = strings.NewReader(req.Stdin)
+	}
 
 	// stdout and stderr are captured independently, each with its own budget,
 	// so a command that floods stdout still returns its error message inline

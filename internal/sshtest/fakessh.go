@@ -18,7 +18,7 @@ type Reply struct {
 	Exit   int
 }
 
-// FakeSSH is a stub `ssh` placed at the front of PATH. It records every
+// FakeSSH is a stub binary placed at the front of PATH. It records every
 // invocation and answers from a fixed reply list.
 //
 // Faking at the PATH boundary rather than behind an interface means production
@@ -28,10 +28,17 @@ type FakeSSH struct {
 	log string
 }
 
-// InstallFakeSSH puts the stub on PATH for the duration of the test. Replies
-// are tested in order and the first match wins; with no match the stub exits 0
-// silently.
+// InstallFakeSSH puts a stub `ssh` on PATH for the duration of the test.
+// Replies are tested in order and the first match wins; with no match the stub
+// exits 0 silently.
 func InstallFakeSSH(t *testing.T, replies ...Reply) *FakeSSH {
+	t.Helper()
+	return InstallFake(t, "ssh", replies...)
+}
+
+// InstallFake puts a stub of the named binary on PATH. Use it for scp as well
+// as ssh, or for both in one test.
+func InstallFake(t *testing.T, name string, replies ...Reply) *FakeSSH {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -60,7 +67,7 @@ func InstallFakeSSH(t *testing.T, replies ...Reply) *FakeSSH {
 		"{ echo '---'; for a in \"$@\"; do echo \"$a\"; done; } >> " + shellQuote(log) + "\n" +
 		"case \"$*\" in\n" + arms.String() + "esac\nexit 0\n"
 
-	path := filepath.Join(dir, "ssh")
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // a stub the test must execute
 		t.Fatalf("write fake ssh: %v", err)
 	}
