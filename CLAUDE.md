@@ -31,6 +31,7 @@ OpenSSH or the remote host already tracks it.
 | `internal/conn` | Control masters: connect, check liveness, disconnect |
 | `internal/exec` | Synchronous execution and the output spill policy |
 | `internal/xfer` | scp transfers plus content-shaped file read and write |
+| `internal/jobs` | Detached remote jobs: start, status, wait, sweep |
 | `internal/version` | Link-time build stamp |
 | `internal/sshtest` | Throwaway sshd for integration tests |
 
