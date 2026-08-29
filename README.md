@@ -16,8 +16,9 @@ reuse with no code at all. ssh-mcp exists for the three things that cannot do:
 
 - **Structured results** — `exit_code`, `stdout`, and `stderr` as separate
   fields, not one merged and truncated blob.
-- **Durable async jobs** — a long build survives a dropped connection, a server
-  restart, and a closed laptop.
+- **Durable async jobs** — a long build survives a dropped connection, an
+  `ssh-mcp` restart, and a closed laptop, but not the remote host rebooting:
+  the job is a detached process there, tracked in files on that host.
 - **A host abstraction** — agents address a connection by id instead of
   reconstructing flags on every call.
 
