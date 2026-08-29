@@ -231,8 +231,9 @@ func TestResolveMatchesWhatWasRendered(t *testing.T) {
 		"controlmaster":  "auto",
 		// ssh normalises durations to seconds when reporting them, so this
 		// is the "10m" the stanza carries.
-		"controlpersist":        "600",
-		"stricthostkeychecking": "accept-new",
+		"controlpersist": "600",
+		// ssh -G reports "yes" as "true".
+		"stricthostkeychecking": "true",
 		"identitiesonly":        "yes",
 		"controlpath":           s.ControlPath(id),
 	}
@@ -268,6 +269,33 @@ func TestOpenRejectsADirectoryTooDeepForSockets(t *testing.T) {
 
 // A stanza the server never wrote must not resolve. Without this check ssh
 // would happily treat the identifier as a literal hostname.
+// Configs written before confirmation existed say accept-new; opening the
+// store must rewrite them, or stanzas from old versions keep trusting new
+// keys silently forever.
+func TestOpenMigratesAcceptNewStanzas(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Ensure(Options{Host: "example.com"}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	legacy := strings.ReplaceAll(readConfig(t, s),
+		"StrictHostKeyChecking yes", "StrictHostKeyChecking accept-new")
+	if err := os.WriteFile(s.ConfigPath(), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	reopened, err := Open(s.dir, s.userConfig)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	cfg := readConfig(t, reopened)
+	if strings.Contains(cfg, "accept-new") {
+		t.Errorf("config still contains accept-new:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, "StrictHostKeyChecking yes") {
+		t.Errorf("config lost strict checking:\n%s", cfg)
+	}
+}
+
 // Promotion is the single step that turns a captured key into a trusted one,
 // so it has to move the line and consume the quarantine in the same call.
 func TestPromoteMovesTheQuarantinedKeyIntoKnownHosts(t *testing.T) {

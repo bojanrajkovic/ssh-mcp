@@ -16,6 +16,10 @@ type Reply struct {
 	Stdout string
 	Stderr string
 	Exit   int
+	// Do is raw shell run when the reply matches, before anything is printed.
+	// It gives a stub a side effect, such as writing a file that a later
+	// invocation or the code under test reads back.
+	Do string
 }
 
 // FakeSSH is a stub binary placed at the front of PATH. It records every
@@ -54,6 +58,9 @@ func InstallFake(t *testing.T, name string, replies ...Reply) *FakeSSH {
 			pattern = "*"
 		}
 		arms.WriteString("  " + pattern + ")\n")
+		if r.Do != "" {
+			arms.WriteString("    " + r.Do + "\n")
+		}
 		if r.Stdout != "" {
 			arms.WriteString("    printf '%s' " + shellQuote(r.Stdout) + "\n")
 		}

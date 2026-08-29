@@ -42,7 +42,12 @@ a path to a local file instead of inline. Read or grep that path directly.
 Use ssh_exec_async for anything long: the job keeps running if the connection
 drops, and ssh_job_wait blocks until it finishes. Job completion also arrives
 as a channel event when the session supports it, but ssh_job_status is always
-authoritative.`
+authoritative.
+
+The first connection to a new host stops until a human confirms its key
+fingerprint. When the client cannot show a confirmation dialog, ssh_connect
+returns the fingerprint instead: show it to the human, and call
+ssh_confirm_host_key only after they approve.`
 
 // Deps are the collaborators a server needs.
 type Deps struct {
@@ -52,6 +57,10 @@ type Deps struct {
 	Xfer  Files
 	Jobs  *jobs.Manager
 	Spill *exec.Spiller
+
+	// AcceptNew skips host key confirmation and trusts new keys itself,
+	// logging each fingerprint. SSH_MCP_ACCEPT_NEW sets it.
+	AcceptNew bool
 }
 
 // Server is an MCP server exposing SSH connections as tools.

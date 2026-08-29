@@ -70,7 +70,29 @@ func Open(dir, userConfig string) (*Store, error) {
 			return nil, fmt.Errorf("sshcfg: create %s: %w", d, err)
 		}
 	}
+	if err := s.withLock(s.migrateStrictChecking); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// migrateStrictChecking rewrites stanzas written before host key confirmation
+// existed (docs/adr/0007). Those said accept-new, which silently trusts any
+// new key — the behavior confirmation replaces. The caller holds the lock.
+func (s *Store) migrateStrictChecking() error {
+	data, err := os.ReadFile(s.ConfigPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sshcfg: read config: %w", err)
+	}
+	updated := strings.ReplaceAll(string(data),
+		"StrictHostKeyChecking accept-new", "StrictHostKeyChecking yes")
+	if updated == string(data) {
+		return nil
+	}
+	return s.writeAtomic(s.ConfigPath(), updated)
 }
 
 // checkControlPathFits rejects a directory whose control sockets could not
@@ -297,9 +319,10 @@ func (s *Store) renderStanza(id ID, o Options) string {
 	b.WriteString("    ControlMaster auto\n")
 	fmt.Fprintf(&b, "    ControlPath %s\n", quote(s.ControlPath(id)))
 	fmt.Fprintf(&b, "    ControlPersist %s\n", controlPersist)
-	// accept-new, not ask: a tty-less server cannot answer a prompt, and ask
-	// is the default. Changed keys are still refused.
-	b.WriteString("    StrictHostKeyChecking accept-new\n")
+	// yes, not accept-new: a key nothing trusts yet must be confirmed before
+	// use (docs/adr/0007), and accept-new would trust it silently. Changed
+	// keys are refused either way.
+	b.WriteString("    StrictHostKeyChecking yes\n")
 	// The server's file is first, so new keys are recorded there; the user's
 	// is read for trust it already established.
 	fmt.Fprintf(&b, "    UserKnownHostsFile %s %s\n",

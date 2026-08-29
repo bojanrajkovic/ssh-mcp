@@ -22,6 +22,7 @@ func connected(t *testing.T, srv *sshtest.Server, limit int) (*Transfer, *exec.E
 		t.Fatalf("Open store: %v", err)
 	}
 	c := conn.New(store)
+	srv.Trust(t, store.KnownHostsPath())
 	id, err := c.Connect(t.Context(), srv.Options())
 	if err != nil {
 		t.Fatalf("Connect: %v", err)

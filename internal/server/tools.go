@@ -2,14 +2,17 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/bojanrajkovic/ssh-mcp/internal/conn"
 	"github.com/bojanrajkovic/ssh-mcp/internal/exec"
 	"github.com/bojanrajkovic/ssh-mcp/internal/jobs"
 	"github.com/bojanrajkovic/ssh-mcp/internal/sshcfg"
@@ -68,6 +71,15 @@ func (s *Server) registerTools() error {
 		Description: "Open or reuse a persistent SSH connection and return its id. " +
 			"Calling this again with the same options returns the same id.",
 	}, s.connect); err != nil {
+		return err
+	}
+
+	if err := addTool(s.mcp, &mcp.Tool{
+		Name: "ssh_confirm_host_key",
+		Description: "Trust a host key that ssh_connect reported as unconfirmed, then connect. " +
+			"The trust decision belongs to the human: show them the fingerprint and call this " +
+			"only after they approve, passing the exact fingerprint from the ssh_connect error.",
+	}, s.confirmHostKey); err != nil {
 		return err
 	}
 
@@ -159,7 +171,7 @@ type connectOut struct {
 	Host string `json:"host"`
 }
 
-func (s *Server) connect(ctx context.Context, _ *mcp.CallToolRequest, in connectIn) (*mcp.CallToolResult, connectOut, error) {
+func (s *Server) connect(ctx context.Context, req *mcp.CallToolRequest, in connectIn) (*mcp.CallToolResult, connectOut, error) {
 	opts := sshcfg.Options{
 		Host:           in.Host,
 		User:           in.User,
@@ -172,11 +184,111 @@ func (s *Server) connect(ctx context.Context, _ *mcp.CallToolRequest, in connect
 		SetEnv:         in.SetEnv,
 	}
 	id, err := s.deps.Conn.Connect(ctx, opts)
+	if errors.Is(err, conn.ErrHostKeyUnknown) {
+		return s.confirmFirstContact(ctx, req, id, in.Host)
+	}
 	if err != nil {
 		return nil, connectOut{}, err
 	}
 	s.sweepJobs(id)
 	return nil, connectOut{ID: string(id), Host: in.Host}, nil
+}
+
+// hostKeyInputID keys the elicitation in a connect's InputRequests and the
+// answer echoed back in InputResponses.
+const hostKeyInputID = "host_key"
+
+// confirmFirstContact runs host key confirmation (docs/adr/0007): capture the
+// key, put its fingerprint in front of the human, and connect only once it is
+// promoted. A decline discards the quarantine; refusals are never recorded.
+//
+// The elicitation rides as a multi-round-trip input request rather than a
+// mid-handler Elicit call, which the protocol forbids from 2026-07-28 on. The
+// SDK bridges older clients by fulfilling the request itself, so both
+// generations take this one path.
+func (s *Server) confirmFirstContact(ctx context.Context, req *mcp.CallToolRequest, id sshcfg.ID, host string) (*mcp.CallToolResult, connectOut, error) {
+	// Second round: the human has answered.
+	if res, ok := req.Params.InputResponses[hostKeyInputID].(*mcp.ElicitResult); ok {
+		if res.Action != "accept" {
+			_ = os.Remove(s.deps.Store.QuarantinePath(id))
+			return nil, connectOut{}, fmt.Errorf("host key for %s declined", host)
+		}
+		key, err := s.deps.Conn.Pending(ctx, id)
+		if err != nil {
+			return nil, connectOut{}, err
+		}
+		// RequestState carried the fingerprint that was shown, so what gets
+		// promoted is provably the key the human saw.
+		if key.Fingerprint != req.Params.RequestState {
+			return nil, connectOut{}, fmt.Errorf(
+				"pending key for %s changed since it was shown; run ssh_connect again", id)
+		}
+		return s.trustAndDial(ctx, id, host)
+	}
+
+	// First round: capture the key and ask.
+	key, err := s.deps.Conn.Capture(ctx, id)
+	if err != nil {
+		return nil, connectOut{}, err
+	}
+
+	if s.deps.AcceptNew {
+		slog.Warn("trusting new host key without confirmation",
+			"host", key.Host, "fingerprint", key.Fingerprint, "why", "SSH_MCP_ACCEPT_NEW")
+		return s.trustAndDial(ctx, id, host)
+	}
+
+	caps := req.Session.InitializeParams().Capabilities
+	if caps == nil || caps.Elicitation == nil {
+		// This client cannot ask the human. The quarantine stays put as the
+		// pending state an explicit ssh_confirm_host_key call resolves.
+		return nil, connectOut{}, fmt.Errorf(
+			"host %s presented an unconfirmed %s key with fingerprint %s: "+
+				"show the fingerprint to the human, and once they approve call "+
+				"ssh_confirm_host_key with id %s and the exact fingerprint",
+			key.Host, key.Type, key.Fingerprint, id)
+	}
+
+	return &mcp.CallToolResult{
+		InputRequests: mcp.InputRequestMap{hostKeyInputID: &mcp.ElicitParams{
+			Message: fmt.Sprintf("The authenticity of host %q can't be established.\n"+
+				"%s key fingerprint is %s.\n"+
+				"Accept to trust this key and connect; decline to refuse.",
+				key.Host, key.Type, key.Fingerprint),
+		}},
+		RequestState: key.Fingerprint,
+	}, connectOut{}, nil
+}
+
+// trustAndDial promotes id's pending key and establishes the connection: the
+// shared tail of every confirmation path.
+func (s *Server) trustAndDial(ctx context.Context, id sshcfg.ID, host string) (*mcp.CallToolResult, connectOut, error) {
+	if err := s.deps.Store.Promote(id); err != nil {
+		return nil, connectOut{}, err
+	}
+	if err := s.deps.Conn.Dial(ctx, id); err != nil {
+		return nil, connectOut{}, err
+	}
+	s.sweepJobs(id)
+	return nil, connectOut{ID: string(id), Host: host}, nil
+}
+
+type confirmIn struct {
+	ID          string `json:"id" jsonschema:"connection id from the failed ssh_connect"`
+	Fingerprint string `json:"fingerprint" jsonschema:"the exact SHA256 fingerprint from the ssh_connect error, after the human approved it"`
+}
+
+func (s *Server) confirmHostKey(ctx context.Context, _ *mcp.CallToolRequest, in confirmIn) (*mcp.CallToolResult, connectOut, error) {
+	id := sshcfg.ID(in.ID)
+	key, err := s.deps.Conn.Pending(ctx, id)
+	if err != nil {
+		return nil, connectOut{}, err
+	}
+	if in.Fingerprint != key.Fingerprint {
+		return nil, connectOut{}, fmt.Errorf(
+			"fingerprint does not match the key pending for %s; re-read it from the ssh_connect error", id)
+	}
+	return s.trustAndDial(ctx, id, key.Host)
 }
 
 type execIn struct {

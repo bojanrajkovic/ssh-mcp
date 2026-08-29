@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +30,8 @@ func integrationConnector(t *testing.T) (*Connector, *sshcfg.Store, string) {
 // because it is OpenSSH's own multiplexing being exercised.
 func TestConnectCheckDisconnectLifecycle(t *testing.T) {
 	srv := sshtest.Start(t)
-	c, _, _ := integrationConnector(t)
+	c, store, _ := integrationConnector(t)
+	srv.Trust(t, store.KnownHostsPath())
 	ctx := t.Context()
 
 	id, err := c.Connect(ctx, srv.Options())
@@ -61,7 +63,8 @@ func TestConnectCheckDisconnectLifecycle(t *testing.T) {
 // Connect re-establishes the same connection rather than minting a new one.
 func TestIdentifierSurvivesDisconnect(t *testing.T) {
 	srv := sshtest.Start(t)
-	c, _, _ := integrationConnector(t)
+	c, store, _ := integrationConnector(t)
+	srv.Trust(t, store.KnownHostsPath())
 	ctx := t.Context()
 
 	first, err := c.Connect(ctx, srv.Options())
@@ -89,14 +92,36 @@ func TestIdentifierSurvivesDisconnect(t *testing.T) {
 	}
 }
 
-// First-use host keys must land in the server's own store and nowhere else,
-// or an agent's trust decision silently becomes the user's.
-func TestFirstContactWritesOnlyTheServerKnownHosts(t *testing.T) {
+// First contact is refused until the key is captured and promoted, and the
+// promoted key must land in the server's own store and nowhere else — or an
+// agent's trust decision silently becomes the user's.
+func TestFirstContactRequiresConfirmation(t *testing.T) {
 	srv := sshtest.Start(t)
 	c, store, userConfig := integrationConnector(t)
+	ctx := t.Context()
 
-	if _, err := c.Connect(t.Context(), srv.Options()); err != nil {
-		t.Fatalf("Connect: %v", err)
+	id, err := c.Connect(ctx, srv.Options())
+	if !errors.Is(err, ErrHostKeyUnknown) {
+		t.Fatalf("first contact = %v, want ErrHostKeyUnknown", err)
+	}
+
+	key, err := c.Capture(ctx, id)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if !strings.HasPrefix(key.Fingerprint, "SHA256:") {
+		t.Errorf("fingerprint = %q, want SHA256:...", key.Fingerprint)
+	}
+	// A capture alone trusts nothing.
+	if _, err := os.Stat(store.KnownHostsPath()); !os.IsNotExist(err) {
+		t.Errorf("capture wrote known_hosts (stat err: %v)", err)
+	}
+
+	if err := store.Promote(id); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if err := c.Dial(ctx, id); err != nil {
+		t.Fatalf("Dial after promotion: %v", err)
 	}
 
 	recorded, err := os.ReadFile(store.KnownHostsPath())
@@ -104,7 +129,7 @@ func TestFirstContactWritesOnlyTheServerKnownHosts(t *testing.T) {
 		t.Fatalf("read server known_hosts: %v", err)
 	}
 	if len(recorded) == 0 {
-		t.Error("server known_hosts is empty; the host key was not recorded")
+		t.Error("server known_hosts is empty; the promoted key was not recorded")
 	}
 
 	userKnownHosts := filepath.Join(filepath.Dir(userConfig), "known_hosts")
@@ -117,7 +142,8 @@ func TestFirstContactWritesOnlyTheServerKnownHosts(t *testing.T) {
 // down", and both arrive as exit status 255.
 func TestWrongKeyIsAnAuthFailure(t *testing.T) {
 	srv := sshtest.Start(t)
-	c, _, _ := integrationConnector(t)
+	c, store, _ := integrationConnector(t)
+	srv.Trust(t, store.KnownHostsPath())
 
 	wrongKey := filepath.Join(t.TempDir(), "wrong")
 	sshtest.Keygen(t, wrongKey)
@@ -148,7 +174,8 @@ func TestClosedPortIsUnreachable(t *testing.T) {
 // genuinely separate host rather than loopback on this machine.
 func TestContainerConnectLifecycle(t *testing.T) {
 	srv := sshtest.StartContainer(t, sshtest.Alpine)
-	c, _, _ := integrationConnector(t)
+	c, store, _ := integrationConnector(t)
+	srv.Trust(t, store.KnownHostsPath())
 	ctx := t.Context()
 
 	id, err := c.Connect(ctx, srv.Options())
