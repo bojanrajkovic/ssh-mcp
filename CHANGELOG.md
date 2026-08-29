@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bojanrajkovic/ssh-mcp/compare/v0.1.0...v0.2.0) (2026-08-29)
+
+
+### Features
+
+* confirm host keys before trust ([#3](https://github.com/bojanrajkovic/ssh-mcp/issues/3)) ([22742c0](https://github.com/bojanrajkovic/ssh-mcp/commit/22742c0a83f6dc88ee3dd25511dda070b6032066))
+
 ## 0.1.0 (2026-08-29)
 
 
