@@ -416,7 +416,7 @@ func (s *Server) watchJob(id sshcfg.ID, jobID jobs.ID) {
 	go func() {
 		job, err := s.deps.Jobs.Wait(s.watch, id, jobID)
 		if err != nil {
-			slog.Debug("job watcher stopped", "job", jobID, "error", err)
+			slog.Info("job watcher stopped", "job", jobID, "error", err)
 			return
 		}
 		content := fmt.Sprintf("ssh job %s finished on %s with exit code %d", jobID, id, job.ExitCode)
@@ -426,8 +426,10 @@ func (s *Server) watchJob(id sshcfg.ID, jobID jobs.ID) {
 			"exit_code":     fmt.Sprintf("%d", job.ExitCode),
 		}
 		if err := s.channel.Push(s.watch, content, meta); err != nil {
-			slog.Debug("channel push failed", "job", jobID, "error", err)
+			slog.Info("channel push failed", "job", jobID, "error", err)
+			return
 		}
+		slog.Info("channel push sent", "job", jobID, "connection", id)
 	}()
 }
 
