@@ -148,18 +148,6 @@ func TestConnectThenExecThroughTheProtocol(t *testing.T) {
 	_ = ctx
 }
 
-// pairedHostKeyLine and pairedFingerprint are a matched ed25519 known_hosts
-// line and the SHA256 fingerprint ssh-keygen -lf reports for it, generated
-// once with:
-//
-//	ssh-keygen -t ed25519 -f /tmp/k -N "" && \
-//	  echo "example.com $(cut -d' ' -f1,2 /tmp/k.pub)" > /tmp/kh && \
-//	  ssh-keygen -lf /tmp/kh
-const (
-	pairedHostKeyLine = "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPApvFBt/hXQ0+il4+O0rdYgUbZwATBwxQwR/4uWDYjD"
-	pairedFingerprint = "SHA256:iKtvssqLgWNZomvlTndSBhcKujKK79rcqzYJ0GLUyiA"
-)
-
 // hostKeyFakes stubs the whole confirmation round-trip: a bare connect that
 // fails until the server's known_hosts is non-empty, and a capture that
 // records a real key into quarantine so the fingerprint it reports is the one
@@ -173,7 +161,7 @@ func hostKeyFakes(t *testing.T, deps Deps) (sshcfg.ID, string) {
 	sshtest.InstallFakeSSH(t,
 		sshtest.Reply{
 			Match: "accept-new",
-			Do:    "printf '" + pairedHostKeyLine + "\\n' > " + deps.Store.QuarantinePath(id),
+			Do:    "printf '" + sshtest.PairedHostKeyLine + "\\n' > " + deps.Store.QuarantinePath(id),
 		},
 		sshtest.Reply{
 			Do: "[ -s " + deps.Store.KnownHostsPath() + " ] || { " +
@@ -181,7 +169,7 @@ func hostKeyFakes(t *testing.T, deps Deps) (sshcfg.ID, string) {
 				"echo 'Host key verification failed.' >&2; exit 255; }",
 		},
 	)
-	return id, pairedFingerprint
+	return id, sshtest.PairedFingerprint
 }
 
 func resultText(res *mcp.CallToolResult) string {
@@ -218,6 +206,113 @@ func TestConnectElicitsAndConnectsOnAccept(t *testing.T) {
 	recorded, err := os.ReadFile(deps.Store.KnownHostsPath())
 	if err != nil || len(recorded) == 0 {
 		t.Errorf("known_hosts after accept = %q (err %v), want the promoted key", recorded, err)
+	}
+}
+
+// Any id-taking tool can raise the same confirmation flow ssh_connect does:
+// exec's lazy re-dial (ControlMaster auto) can hit an unconfirmed host key
+// just as easily as a fresh connect can.
+func TestExecRaisesHostKeyConfirmation(t *testing.T) {
+	deps := testDeps(t)
+	if _, err := deps.Store.Ensure(sshcfg.Options{Host: "example.com"}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	id, fingerprint := hostKeyFakes(t, deps)
+
+	var message string
+	cs := sessionWith(t, deps, &mcp.ClientOptions{
+		ElicitationHandler: func(_ context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			message = req.Params.Message
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+	})
+
+	var ran execOut
+	callTool(t, cs, "ssh_exec", map[string]any{"id": string(id), "command": "uname"}, &ran)
+
+	if !strings.Contains(message, fingerprint) {
+		t.Errorf("elicitation %q does not show the fingerprint", message)
+	}
+	recorded, err := os.ReadFile(deps.Store.KnownHostsPath())
+	if err != nil || len(recorded) == 0 {
+		t.Errorf("known_hosts after accept = %q (err %v), want the promoted key", recorded, err)
+	}
+}
+
+// scp riding an unconfirmed host key must raise the same confirmation flow as
+// ssh_exec's lazy re-dial. Dropping -q from scp's args (the fix under test) is
+// what leaves "Host key verification failed" visible on stderr at all: with
+// -q, scp swallows every diagnostic including that one, and ssh_copy could
+// never classify the refusal well enough to raise confirmation.
+func TestCopyRaisesHostKeyConfirmation(t *testing.T) {
+	deps := testDeps(t)
+	if _, err := deps.Store.Ensure(sshcfg.Options{Host: "example.com"}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	id, fingerprint := hostKeyFakes(t, deps)
+	sshtest.InstallFake(t, "scp", sshtest.Reply{
+		Do: "[ -s " + deps.Store.KnownHostsPath() + " ] || { " +
+			"echo 'Host key verification failed.' >&2; exit 255; }",
+	})
+
+	var message string
+	cs := sessionWith(t, deps, &mcp.ClientOptions{
+		ElicitationHandler: func(_ context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			message = req.Params.Message
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+	})
+
+	var copied copyOut
+	callTool(t, cs, "ssh_copy", map[string]any{
+		"id": string(id), "direction": "download", "source": "/remote/file", "dest": t.TempDir(),
+	}, &copied)
+
+	if !strings.Contains(message, fingerprint) {
+		t.Errorf("elicitation %q does not show the fingerprint", message)
+	}
+	recorded, err := os.ReadFile(deps.Store.KnownHostsPath())
+	if err != nil || len(recorded) == 0 {
+		t.Errorf("known_hosts after accept = %q (err %v), want the promoted key", recorded, err)
+	}
+}
+
+// A redelivered retry or a concurrent accept can reach confirmed()'s round-2
+// branch after the quarantine it would promote is already consumed: the
+// first accept already moved the key into known_hosts and removed the
+// quarantine file. That must still succeed rather than surface Promote's
+// "no host key pending" — the strict dial confirmed() runs afterward is the
+// real truth test, and it passes because the key is genuinely trusted now.
+func TestSecondRoundAcceptIsIdempotentAfterPromotion(t *testing.T) {
+	deps := testDeps(t)
+	id, fingerprint := hostKeyFakes(t, deps)
+
+	cs := sessionWith(t, deps, &mcp.ClientOptions{
+		ElicitationHandler: func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+	})
+
+	var connected connectOut
+	callTool(t, cs, "ssh_connect", map[string]any{"host": "example.com"}, &connected)
+	if connected.ID != string(id) {
+		t.Fatalf("connected id = %q, want %q", connected.ID, id)
+	}
+
+	// Hand-crafted params stand in for a retry the client resends after
+	// already having gotten the human's accept applied once: same id, same
+	// fingerprint, but nothing left in quarantine to promote.
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:           "ssh_connect",
+		Arguments:      map[string]any{"host": "example.com"},
+		InputResponses: mcp.InputResponseMap{hostKeyInputID: &mcp.ElicitResult{Action: "accept"}},
+		RequestState:   fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("ssh_connect: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("redelivered accept failed: %s", resultText(res))
 	}
 }
 
@@ -328,6 +423,28 @@ func TestConfirmHostKeyRejectsAnUnknownID(t *testing.T) {
 	}
 	if !strings.Contains(resultText(res), "no connection") {
 		t.Errorf("error %q does not say the connection is unknown", resultText(res))
+	}
+}
+
+// A malformed id must be refused by the schema before any handler runs: the
+// "id" property carries sshcfg.IDPattern (addTool), so a path-traversal id
+// never reaches the code that shells out to ssh.
+func TestExecSchemaRejectsAMalformedID(t *testing.T) {
+	fake := sshtest.InstallFakeSSH(t, sshtest.Reply{Exit: 0})
+	cs := session(t, testDeps(t))
+
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "ssh_exec",
+		Arguments: map[string]any{"id": "../../../tmp/evil", "command": "uname"},
+	})
+	if err != nil {
+		t.Fatalf("ssh_exec: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("ssh_exec accepted a malformed id")
+	}
+	if calls := fake.Calls(t); len(calls) != 0 {
+		t.Errorf("fake ssh was invoked %d times, want 0: the schema should have refused the id first", len(calls))
 	}
 }
 

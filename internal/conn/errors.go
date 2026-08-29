@@ -15,9 +15,14 @@ var (
 	// one already recorded. accept-new permits unknown hosts but never this.
 	ErrHostKeyChanged = errors.New("remote host key changed")
 
-	// ErrHostKeyUnknown means the host presented a key that no known_hosts
-	// line trusts yet. Strict checking refuses it; the confirmation flow
-	// decides whether it becomes trusted.
+	// ErrHostKeyUnknown means strict checking refused the presented key. It
+	// matches only "Host key verification failed" — decades-stable OpenSSH
+	// wording — but that line alone does not prove the key is genuinely new:
+	// other refusals end with it too. Whether a key was actually unconfirmed
+	// is decided by running a capture and checking whether a key lands in
+	// quarantine (internal/conn.Capture is the oracle), not by parsing this
+	// message further. A caller that gets an empty capture back must treat
+	// this as some other refusal and surface the original error.
 	ErrHostKeyUnknown = errors.New("host key not yet trusted")
 
 	// ErrAuth means the connection reached sshd and was refused: no acceptable
@@ -34,9 +39,13 @@ var (
 // ponytail: classification is substring matching on ssh's diagnostics, whose
 // wording can change between OpenSSH releases. The ceiling is that a reworded
 // message degrades to an unclassified error rather than a wrong one, and the
-// raw stderr is always wrapped in. Upgrade path if that stops being enough:
-// probe with `ssh -O check` and a TCP dial to separate reachability from auth
-// without reading text at all.
+// raw stderr is always wrapped in. ErrHostKeyUnknown leans on this ceiling on
+// purpose: its one phrase, "Host key verification failed", is stable but also
+// matches refusals that are not an unknown key, so nothing here decides that
+// question — internal/conn.Capture does, by checking whether a key actually
+// lands in quarantine. Upgrade path if substring matching stops being enough
+// elsewhere: probe with `ssh -O check` and a TCP dial to separate reachability
+// from auth without reading text at all.
 //
 // signatures maps a sentinel to the ssh diagnostics that imply it. Order
 // matters: a changed host key also prints "Host key verification failed", so
@@ -49,10 +58,10 @@ var signatures = []struct {
 		"REMOTE HOST IDENTIFICATION HAS CHANGED",
 		"host key for", // "... has changed"
 	}},
-	// Before ErrAuth: strict checking's refusal of an unknown key also ends
-	// with "Host key verification failed".
+	// Before ErrAuth and ErrUnreachable: strict checking's refusal of any
+	// unconfirmed key, changed or unknown, ends with this line too.
 	{ErrHostKeyUnknown, []string{
-		"host key is known", // "No ED25519 host key is known for ..."
+		"Host key verification failed",
 	}},
 	{ErrUnreachable, []string{
 		"Connection refused",
@@ -67,7 +76,6 @@ var signatures = []struct {
 		"Permission denied",
 		"Too many authentication failures",
 		"no matching host key type found",
-		"Host key verification failed",
 		"Authentication failed",
 	}},
 	{ErrNoMaster, []string{

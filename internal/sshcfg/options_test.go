@@ -19,6 +19,10 @@ func base() Options {
 //	ssh-keygen -t ed25519 -f /tmp/k -N "" && \
 //	  echo "example.com $(cut -d' ' -f1,2 /tmp/k.pub)" > /tmp/kh && \
 //	  ssh-keygen -lf /tmp/kh
+//
+// This copy stays local rather than moving to internal/sshtest.PairedHostKeyLine:
+// sshtest imports sshcfg (for Server.Options), so sshcfg importing sshtest back
+// would be a cycle.
 const (
 	pairedHostKeyLine = "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPApvFBt/hXQ0+il4+O0rdYgUbZwATBwxQwR/4uWDYjD"
 	pairedFingerprint = "SHA256:iKtvssqLgWNZomvlTndSBhcKujKK79rcqzYJ0GLUyiA"

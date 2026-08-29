@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,12 @@ import (
 	"syscall"
 	"time"
 )
+
+// ErrNothingPending means a quarantine file does not exist: nothing is
+// waiting on confirmation for that id. It is wrapped with the id for context
+// (see quarantineLine), so a caller can match it with errors.Is while the
+// message still names the connection.
+var ErrNothingPending = errors.New("no host key pending")
 
 const (
 	// controlPersist keeps an idle master alive long enough to be reused
@@ -86,22 +93,9 @@ const legacyStrictChecking = "StrictHostKeyChecking accept-new"
 // existed. Those said accept-new, which silently trusts any new key — the
 // behavior confirmation replaces.
 //
-// The read and the "is there anything to do" check happen without the lock.
-// Most startups find nothing to migrate, and a directory shared by several
-// server processes would otherwise serialize every one of them on a flock for
-// no reason. The lock is only taken — and the file re-read and rewritten
-// under it — when a rewrite actually turns out to be needed.
+// This runs once per server startup, so one flock is nothing to worry about —
+// not worth the double read a lock-free fast path used to buy.
 func (s *Store) migrateStrictChecking() error {
-	data, err := os.ReadFile(s.ConfigPath())
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("sshcfg: read config: %w", err)
-	}
-	if migrateStrictCheckingLines(string(data)) == string(data) {
-		return nil
-	}
 	return s.withLock(func() error {
 		data, err := os.ReadFile(s.ConfigPath())
 		if os.IsNotExist(err) {
@@ -213,6 +207,38 @@ func ParseHostKeyLine(line string) (hostPattern, keyType, fingerprint string, er
 	return fields[0], keyType, fingerprint, nil
 }
 
+// quarantineLine is the single authority on the quarantine file's shape: read,
+// trim, and require exactly the one line a capture ever writes. Both errors it
+// can produce — nothing pending, or a corrupt multi-key file — are formatted
+// here and nowhere else, so Promote and PendingLine can never drift apart on
+// what those states mean.
+func (s *Store) quarantineLine(id ID) (string, error) {
+	data, err := os.ReadFile(s.QuarantinePath(id))
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("no host key pending for %s: %w", id, ErrNothingPending)
+	}
+	if err != nil {
+		return "", fmt.Errorf("sshcfg: read quarantine: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Exactly one pending key per connection. A capture records the single
+	// key ssh negotiated; more than one means something else wrote the file,
+	// and starting over is safer than guessing which was seen.
+	if len(lines) != 1 {
+		return "", fmt.Errorf("quarantine for %s held %d keys; run ssh_connect again", id, len(lines))
+	}
+	return lines[0], nil
+}
+
+// PendingLine returns id's quarantined known_hosts line, or ErrNothingPending
+// when nothing is quarantined. It runs unlocked, the same as the read it
+// replaces: the quarantine file's only writer is a single ssh invocation
+// (Capture), so nothing here contends with Promote's locked read-modify-write.
+func (s *Store) PendingLine(id ID) (string, error) {
+	return s.quarantineLine(id)
+}
+
 // Promote verifies id's quarantined key against wantFingerprint and, on a
 // match, moves it into the server's known_hosts — the step that makes it
 // trusted. The quarantine file is consumed either way it can be: promotion
@@ -224,24 +250,15 @@ func ParseHostKeyLine(line string) (hostPattern, keyType, fingerprint string, er
 // a human confirmed and the bytes actually appended to known_hosts.
 func (s *Store) Promote(id ID, wantFingerprint string) error {
 	return s.withLock(func() error {
-		data, err := os.ReadFile(s.QuarantinePath(id))
-		if os.IsNotExist(err) {
-			return fmt.Errorf("no host key pending for %s", id)
-		}
+		line, err := s.quarantineLine(id)
 		if err != nil {
-			return fmt.Errorf("sshcfg: read quarantine: %w", err)
+			if !errors.Is(err, ErrNothingPending) {
+				_ = os.Remove(s.QuarantinePath(id))
+			}
+			return err
 		}
 
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		// Exactly one pending key per connection. A capture records the
-		// single key ssh negotiated; more than one means something else wrote
-		// the file, and starting over is safer than guessing which was seen.
-		if len(lines) != 1 {
-			_ = os.Remove(s.QuarantinePath(id))
-			return fmt.Errorf("quarantine for %s held %d keys; run ssh_connect again", id, len(lines))
-		}
-
-		_, _, fingerprint, err := ParseHostKeyLine(lines[0])
+		_, _, fingerprint, err := ParseHostKeyLine(line)
 		if err != nil {
 			return fmt.Errorf("sshcfg: parse quarantined key: %w", err)
 		}
@@ -256,7 +273,14 @@ func (s *Store) Promote(id ID, wantFingerprint string) error {
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("sshcfg: read known_hosts: %w", err)
 		}
-		if err := s.writeAtomic(s.KnownHostsPath(), string(existing)+string(data)); err != nil {
+		// A file this package didn't just write may not end in a newline;
+		// without this guard the promoted line would be appended onto the
+		// same line as the last existing one.
+		content := string(existing)
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		if err := s.writeAtomic(s.KnownHostsPath(), content+line+"\n"); err != nil {
 			return err
 		}
 		return os.Remove(s.QuarantinePath(id))
@@ -428,8 +452,16 @@ func (s *Store) renderStanza(id ID, o Options) string {
 	if o.ConnectTimeout > 0 {
 		fmt.Fprintf(&b, "    ConnectTimeout %d\n", int(o.ConnectTimeout.Seconds()))
 	}
-	for _, k := range sortedKeys(o.SetEnv) {
-		fmt.Fprintf(&b, "    SetEnv %s\n", quote(k+"="+o.SetEnv[k]))
+	// OpenSSH applies first-obtained-wins to the whole SetEnv keyword, not per
+	// pair: a second SetEnv line is ignored outright, silently dropping every
+	// variable after the first (verified on the wire). All pairs render on
+	// the one line ssh actually reads, each individually quoted.
+	if len(o.SetEnv) > 0 {
+		pairs := make([]string, 0, len(o.SetEnv))
+		for _, k := range sortedKeys(o.SetEnv) {
+			pairs = append(pairs, quote(k+"="+o.SetEnv[k]))
+		}
+		fmt.Fprintf(&b, "    SetEnv %s\n", strings.Join(pairs, " "))
 	}
 	// Without BatchMode a passphrase-protected key or a password-auth host
 	// makes ssh prompt, and a server with no tty has nothing to answer with.

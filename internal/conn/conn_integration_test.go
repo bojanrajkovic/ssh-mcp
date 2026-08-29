@@ -34,9 +34,12 @@ func TestConnectCheckDisconnectLifecycle(t *testing.T) {
 	srv.Trust(t, store.KnownHostsPath())
 	ctx := t.Context()
 
-	id, err := c.Connect(ctx, srv.Options())
+	id, err := store.Ensure(srv.Options())
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(ctx, id); err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
 
 	live, err := c.Check(ctx, id)
@@ -44,7 +47,7 @@ func TestConnectCheckDisconnectLifecycle(t *testing.T) {
 		t.Fatalf("Check: %v", err)
 	}
 	if !live {
-		t.Fatal("no control master after Connect")
+		t.Fatal("no control master after Dial")
 	}
 
 	if err := c.Disconnect(ctx, id); err != nil {
@@ -67,20 +70,26 @@ func TestIdentifierSurvivesDisconnect(t *testing.T) {
 	srv.Trust(t, store.KnownHostsPath())
 	ctx := t.Context()
 
-	first, err := c.Connect(ctx, srv.Options())
+	first, err := store.Ensure(srv.Options())
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(ctx, first); err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
 	if err := c.Disconnect(ctx, first); err != nil {
 		t.Fatalf("Disconnect: %v", err)
 	}
 
-	second, err := c.Connect(ctx, srv.Options())
+	second, err := store.Ensure(srv.Options())
 	if err != nil {
-		t.Fatalf("reconnect: %v", err)
+		t.Fatalf("Ensure: %v", err)
 	}
 	if second != first {
 		t.Errorf("identifier changed across a disconnect: %q then %q", first, second)
+	}
+	if err := c.Dial(ctx, second); err != nil {
+		t.Fatalf("reconnect: %v", err)
 	}
 
 	live, err := c.Check(ctx, second)
@@ -100,8 +109,11 @@ func TestFirstContactRequiresConfirmation(t *testing.T) {
 	c, store, userConfig := integrationConnector(t)
 	ctx := t.Context()
 
-	id, err := c.Connect(ctx, srv.Options())
-	if !errors.Is(err, ErrHostKeyUnknown) {
+	id, err := store.Ensure(srv.Options())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(ctx, id); !errors.Is(err, ErrHostKeyUnknown) {
 		t.Fatalf("first contact = %v, want ErrHostKeyUnknown", err)
 	}
 
@@ -150,23 +162,29 @@ func TestWrongKeyIsAnAuthFailure(t *testing.T) {
 
 	o := srv.Options()
 	o.IdentityFile = wrongKey
-	_, err := c.Connect(t.Context(), o)
-	if !errors.Is(err, ErrAuth) {
-		t.Fatalf("Connect with an unauthorised key = %v, want ErrAuth", err)
+	id, err := store.Ensure(o)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(t.Context(), id); !errors.Is(err, ErrAuth) {
+		t.Fatalf("Dial with an unauthorised key = %v, want ErrAuth", err)
 	}
 }
 
 func TestClosedPortIsUnreachable(t *testing.T) {
-	c, _, _ := integrationConnector(t)
+	c, store, _ := integrationConnector(t)
 	o := sshcfg.Options{
 		Host:           "127.0.0.1",
 		Port:           1,
 		User:           "nobody",
 		ConnectTimeout: 5 * time.Second,
 	}
-	_, err := c.Connect(t.Context(), o)
-	if !errors.Is(err, ErrUnreachable) {
-		t.Fatalf("Connect to a closed port = %v, want ErrUnreachable", err)
+	id, err := store.Ensure(o)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(t.Context(), id); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("Dial to a closed port = %v, want ErrUnreachable", err)
 	}
 }
 
@@ -178,16 +196,19 @@ func TestContainerConnectLifecycle(t *testing.T) {
 	srv.Trust(t, store.KnownHostsPath())
 	ctx := t.Context()
 
-	id, err := c.Connect(ctx, srv.Options())
+	id, err := store.Ensure(srv.Options())
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(ctx, id); err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
 	live, err := c.Check(ctx, id)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
 	if !live {
-		t.Fatal("no control master after Connect")
+		t.Fatal("no control master after Dial")
 	}
 
 	statuses, err := c.List(ctx)

@@ -44,10 +44,11 @@ drops, and ssh_job_wait blocks until it finishes. Job completion also arrives
 as a channel event when the session supports it, but ssh_job_status is always
 authoritative.
 
-The first connection to a new host stops until a human confirms its key
-fingerprint. When the client cannot show a confirmation dialog, ssh_connect
-returns the fingerprint instead: show it to the human, and call
-ssh_confirm_host_key only after they confirm.`
+The first use of a new host stops until a human confirms its key fingerprint,
+raised by whichever tool touches that host first, not only ssh_connect. When
+the client cannot show a confirmation dialog, the tool call returns the
+fingerprint instead: show it to the human, and call ssh_confirm_host_key only
+after they confirm.`
 
 // Deps are the collaborators a server needs.
 type Deps struct {

@@ -28,8 +28,8 @@ OpenSSH or the remote host already tracks it.
 |------|-------|
 | `cmd/ssh-mcp` | Entry point, stdout capture, signal handling |
 | `internal/server` | MCP server wiring and transport |
-| `internal/sshcfg` | Identifier derivation, stanza rendering, the config file |
-| `internal/conn` | Control masters: connect, check liveness, disconnect |
+| `internal/sshcfg` | Identifier derivation, stanza rendering, the config file, host key quarantine and promotion, fingerprints |
+| `internal/conn` | Control masters: connect, check liveness, disconnect, host key capture, ssh diagnostic classification |
 | `internal/exec` | Synchronous execution and the output spill policy |
 | `internal/xfer` | scp transfers plus content-shaped file read and write |
 | `internal/jobs` | Detached remote jobs: start, status, wait, sweep |

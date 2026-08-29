@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -66,6 +67,14 @@ const (
 	idHexLen    = 8
 )
 
+// IDPattern is the anchored regex every valid ID matches: idPrefix followed by
+// exactly idHexLen lowercase hex characters. Tool schemas advertise it as the
+// "id" property's pattern (internal/server/tools.go), and ParseID validates
+// against the same compiled expression, so the two cannot drift apart.
+var IDPattern = fmt.Sprintf("^%s[0-9a-f]{%d}$", idPrefix, idHexLen)
+
+var idRegexp = regexp.MustCompile(IDPattern)
+
 // ParseID validates that s has the exact shape Derive produces: idPrefix
 // followed by exactly idHexLen lowercase hex characters.
 //
@@ -74,14 +83,8 @@ const (
 // directory, and into ssh's argv, where a leading "-" parses as a flag rather
 // than a Host.
 func ParseID(s string) (ID, error) {
-	hex, ok := strings.CutPrefix(s, idPrefix)
-	if !ok || len(hex) != idHexLen {
+	if !idRegexp.MatchString(s) {
 		return "", fmt.Errorf("sshcfg: %q is not a connection id", s)
-	}
-	for _, r := range hex {
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			return "", fmt.Errorf("sshcfg: %q is not a connection id", s)
-		}
 	}
 	return ID(s), nil
 }

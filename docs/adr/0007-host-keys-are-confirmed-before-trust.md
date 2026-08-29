@@ -31,12 +31,15 @@ ssh itself negotiates and records the exact key it would use. `ssh-keyscan`
 was rejected because it cannot reach through `ProxyJump` and resolves
 connection parameters a second time, separately from ssh.
 
-That dry run disables every authentication method. Key exchange records the
-host key before authentication happens, so with nothing left to authenticate
-with, the run can never open a connection to a host the human has not yet
-confirmed — an agent socket or a `SetEnv` value is never exposed to a host
-that may be about to be refused. The run failing is expected: a capture
-succeeds when the quarantine holds a key afterward, not when ssh exits zero.
+That dry run disables every standard authentication method. ssh always offers
+"none" underneath whatever is configured, though, so a server that accepts it
+still opens a session. Against one, a command-line `SetEnv` override
+(`SSH_MCP_CAPTURE=1`) displaces the stanza's own values, since ssh evaluates
+the command line before the config file and SetEnv is first-obtained-wins: the
+session that opens carries only `true`, no agent forwarding, and no
+environment the stanza would have sent. The run failing is expected: a
+capture succeeds when the quarantine holds a key afterward, not when ssh
+exits zero.
 
 Fingerprints are computed in-process from the recorded known_hosts line: SHA256
 of the decoded key blob, base64-encoded without padding and prefixed
@@ -71,6 +74,20 @@ config: stanzas always render `yes`, so toggling it rewrites nothing.
 Scope is the target host's key only. A `ProxyJump` bastion resolves through
 the user's own config, so its key is governed by the user's known_hosts and
 policy, exactly as before this decision.
+
+Confirmation is raised by whichever tool touches the connection, not only
+`ssh_connect`. `ssh_exec`, `ssh_copy`, and every other tool that takes a
+connection id can lazily re-dial through the same `ControlMaster auto`
+stanza, and that dial can hit the same unconfirmed key. A declined or lost
+key never strands an id that used to work: the tool that hit it asks the same
+question `ssh_connect` would have.
+
+Classification does not depend on OpenSSH's wording. Strict refusal is
+detected by matching the stable `Host key verification failed` line, which
+also fires for refusals that are not an unknown key. The capture decides
+what actually happened: a key landing in quarantine means the key was
+genuinely unconfirmed, and an empty capture means it was something else, so
+the original error is surfaced instead.
 
 ```mermaid
 sequenceDiagram

@@ -69,10 +69,10 @@ so an agent's trust decisions never land in your trust store.
 
 ## Host keys
 
-The first connection to a new host stops until a human confirms its key
-fingerprint, the same decision interactive `ssh` asks for. Clients that
-support MCP elicitation show a confirmation dialog. For clients that do not,
-`ssh_connect` returns the fingerprint and the agent calls
+The first use of a new host — whichever tool touches it — stops until a human
+confirms its key fingerprint, the same decision interactive `ssh` asks for.
+Clients that support MCP elicitation show a confirmation dialog. For clients
+that do not, the tool call returns the fingerprint and the agent calls
 `ssh_confirm_host_key` once the human confirms. Hosts already trusted in your
 own `known_hosts` connect without any prompt, and changed keys are always
 refused. Set `SSH_MCP_ACCEPT_NEW` to any value to skip confirmation and trust

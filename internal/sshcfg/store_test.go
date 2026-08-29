@@ -208,6 +208,7 @@ func TestResolveMatchesWhatWasRendered(t *testing.T) {
 		ForwardAgent:   true,
 		JumpHost:       "bastion.example.com",
 		ConnectTimeout: 10 * time.Second,
+		SetEnv:         map[string]string{"LANG": "en_US.UTF-8", "TZ": "UTC"},
 	}
 	id, err := s.Ensure(o)
 	if err != nil {
@@ -250,6 +251,14 @@ func TestResolveMatchesWhatWasRendered(t *testing.T) {
 	kh := First(resolved, "userknownhostsfile")
 	if !strings.HasPrefix(kh, s.KnownHostsPath()) {
 		t.Errorf("userknownhostsfile = %q, want it to start with %q", kh, s.KnownHostsPath())
+	}
+
+	// ssh -G reports SetEnv as one "setenv" line per pair even though the
+	// stanza renders them on a single line (F4): both variables have to
+	// survive, proving the one-line rendering did not drop the second.
+	wantEnv := []string{"LANG=en_US.UTF-8", "TZ=UTC"}
+	if diff := cmp.Diff(wantEnv, resolved["setenv"]); diff != "" {
+		t.Errorf("setenv (-want +got):\n%s", diff)
 	}
 }
 
@@ -325,6 +334,35 @@ func TestPromoteMovesTheQuarantinedKeyIntoKnownHosts(t *testing.T) {
 	// than silently succeeding.
 	if err := s.Promote(id, pairedFingerprint); err == nil {
 		t.Error("Promote with no quarantine succeeded")
+	}
+}
+
+// A known_hosts file this package did not just write may not end in a
+// newline — nothing about an arbitrary text file guarantees that. Promoting
+// into it still has to produce two distinct lines, not the new key
+// concatenated onto the end of the last existing one.
+func TestPromoteAddsMissingNewlineBeforeAppending(t *testing.T) {
+	s := newStore(t)
+	id := ID("conn_deadbeef")
+	if err := os.WriteFile(s.QuarantinePath(id), []byte(pairedHostKeyLine+"\n"), 0o600); err != nil {
+		t.Fatalf("write quarantine: %v", err)
+	}
+	const existing = "other.example.com ssh-ed25519 AAAAOTHER"
+	if err := os.WriteFile(s.KnownHostsPath(), []byte(existing), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+
+	if err := s.Promote(id, pairedFingerprint); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	recorded, err := os.ReadFile(s.KnownHostsPath())
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(recorded), "\n"), "\n")
+	if diff := cmp.Diff([]string{existing, pairedHostKeyLine}, lines); diff != "" {
+		t.Errorf("known_hosts lines (-want +got):\n%s", diff)
 	}
 }
 
