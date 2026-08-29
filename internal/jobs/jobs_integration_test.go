@@ -22,9 +22,13 @@ func connected(t *testing.T, srv *sshtest.Server, limit int) (*Manager, *exec.Ex
 		t.Fatalf("Open store: %v", err)
 	}
 	c := conn.New(store)
-	id, err := c.Connect(t.Context(), srv.Options())
+	srv.Trust(t, store.KnownHostsPath())
+	id, err := store.Ensure(srv.Options())
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(t.Context(), id); err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
 	e := exec.New(c, store, exec.NewSpiller(filepath.Join(dir, "spill"), limit))
 	m := New(e)
@@ -90,9 +94,13 @@ func TestJobSurvivesLosingTheConnection(t *testing.T) {
 		t.Fatalf("Open store: %v", err)
 	}
 	c := conn.New(store)
-	id, err := c.Connect(t.Context(), srv.Options())
+	srv.Trust(t, store.KnownHostsPath())
+	id, err := store.Ensure(srv.Options())
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(t.Context(), id); err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
 	e := exec.New(c, store, exec.NewSpiller(filepath.Join(dir, "spill"), 0))
 	m := New(e)

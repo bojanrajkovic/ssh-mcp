@@ -12,6 +12,92 @@ func base() Options {
 	return Options{Host: "example.com", User: "deploy", Port: 22}
 }
 
+// pairedHostKeyLine and pairedFingerprint are a matched ed25519 known_hosts
+// line and the SHA256 fingerprint ssh-keygen -lf reports for it, generated
+// once with:
+//
+//	ssh-keygen -t ed25519 -f /tmp/k -N "" && \
+//	  echo "example.com $(cut -d' ' -f1,2 /tmp/k.pub)" > /tmp/kh && \
+//	  ssh-keygen -lf /tmp/kh
+//
+// This copy stays local rather than moving to internal/sshtest.PairedHostKeyLine:
+// sshtest imports sshcfg (for Server.Options), so sshcfg importing sshtest back
+// would be a cycle.
+const (
+	pairedHostKeyLine = "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPApvFBt/hXQ0+il4+O0rdYgUbZwATBwxQwR/4uWDYjD"
+	pairedFingerprint = "SHA256:iKtvssqLgWNZomvlTndSBhcKujKK79rcqzYJ0GLUyiA"
+)
+
+// ParseID is the only thing standing between a tool-supplied string and a
+// filepath.Join or ssh argv, so every shape that could break out has its own
+// case rather than one generic "garbage in" test.
+func TestParseID(t *testing.T) {
+	cases := map[string]struct {
+		in      string
+		wantErr bool
+	}{
+		"valid":         {"conn_deadbeef", false},
+		"traversal":     {"../x", true},
+		"leading dash":  {"-oProxyCommand=x", true},
+		"wrong prefix":  {"xconn_deadbeef", true},
+		"uppercase hex": {"conn_DEADBEEF", true},
+		"short":         {"conn_deadbee", true},
+		"long":          {"conn_deadbeef0", true},
+		"empty":         {"", true},
+		"prefix only":   {"conn_", true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			id, err := ParseID(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("ParseID(%q) = %q, want an error", tc.in, id)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseID(%q): %v", tc.in, err)
+			}
+			if string(id) != tc.in {
+				t.Errorf("ParseID(%q) = %q, want %q", tc.in, id, tc.in)
+			}
+		})
+	}
+}
+
+// The formula has to match ssh-keygen -lf exactly, or a human confirming a
+// fingerprint shown by ssh_connect would be confirming a different key than
+// the one ssh itself would show them.
+func TestParseHostKeyLine(t *testing.T) {
+	host, keyType, fingerprint, err := ParseHostKeyLine(pairedHostKeyLine)
+	if err != nil {
+		t.Fatalf("ParseHostKeyLine: %v", err)
+	}
+	if host != "example.com" {
+		t.Errorf("host = %q, want %q", host, "example.com")
+	}
+	if keyType != "ED25519" {
+		t.Errorf("keyType = %q, want %q", keyType, "ED25519")
+	}
+	if fingerprint != pairedFingerprint {
+		t.Errorf("fingerprint = %q, want %q", fingerprint, pairedFingerprint)
+	}
+}
+
+func TestParseHostKeyLineRejectsGarbage(t *testing.T) {
+	cases := map[string]string{
+		"too few fields": "example.com ssh-ed25519",
+		"bad base64":     "example.com ssh-ed25519 not-base64!!",
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := ParseHostKeyLine(line); err == nil {
+				t.Errorf("ParseHostKeyLine(%q) = nil error, want one", line)
+			}
+		})
+	}
+}
+
 // Anything that can break out of a config line would let a caller smuggle in
 // keywords the typed surface exists to forbid, so every string field rejects
 // control characters, quotes, and backslashes.

@@ -39,19 +39,19 @@ func TestCopyArguments(t *testing.T) {
 		"upload": {
 			Upload, "/local/file", "/remote/file", false,
 			func(cfg, id string) []string {
-				return []string{"-F", cfg, "-q", "/local/file", id + ":/remote/file"}
+				return []string{"-F", cfg, "/local/file", id + ":/remote/file"}
 			},
 		},
 		"download": {
 			Download, "/remote/file", "/local/file", false,
 			func(cfg, id string) []string {
-				return []string{"-F", cfg, "-q", id + ":/remote/file", "/local/file"}
+				return []string{"-F", cfg, id + ":/remote/file", "/local/file"}
 			},
 		},
 		"recursive upload": {
 			Upload, "/local/dir", "/remote/dir", true,
 			func(cfg, id string) []string {
-				return []string{"-F", cfg, "-q", "-r", "/local/dir", id + ":/remote/dir"}
+				return []string{"-F", cfg, "-r", "/local/dir", id + ":/remote/dir"}
 			},
 		},
 	}

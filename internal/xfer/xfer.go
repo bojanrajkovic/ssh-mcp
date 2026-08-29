@@ -79,7 +79,7 @@ func (x *Transfer) Copy(
 		return Stats{}, fmt.Errorf("xfer: unknown direction %q", dir)
 	}
 
-	args := []string{"-F", x.store.ConfigPath(), "-q"}
+	args := []string{"-F", x.store.ConfigPath()}
 	if recursive {
 		args = append(args, "-r")
 	}

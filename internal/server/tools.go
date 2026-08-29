@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/bojanrajkovic/ssh-mcp/internal/conn"
 	"github.com/bojanrajkovic/ssh-mcp/internal/exec"
 	"github.com/bojanrajkovic/ssh-mcp/internal/jobs"
 	"github.com/bojanrajkovic/ssh-mcp/internal/sshcfg"
@@ -48,6 +50,14 @@ func addTool[In, Out any](s *mcp.Server, tool *mcp.Tool, h mcp.ToolHandlerFor[In
 	// An empty schema matches anything, so "not empty" matches nothing, which
 	// is how a false schema is written in the 2020-12 draft.
 	schema.AdditionalProperties = &jsonschema.Schema{Not: &jsonschema.Schema{}}
+	// The "id" property is always a connection id (job_id and other fields are
+	// left alone). This pattern is agent-facing advertisement plus an early
+	// refusal for a badly-shaped id before any handler runs; it is not the
+	// authoritative check. That lives in confirmed(), which validates again
+	// with ParseID, so a handler cannot ship half-guarded.
+	if idSchema, ok := schema.Properties["id"]; ok {
+		idSchema.Pattern = sshcfg.IDPattern
+	}
 	tool.InputSchema = schema
 	mcp.AddTool(s, tool, h)
 	return nil
@@ -68,6 +78,15 @@ func (s *Server) registerTools() error {
 		Description: "Open or reuse a persistent SSH connection and return its id. " +
 			"Calling this again with the same options returns the same id.",
 	}, s.connect); err != nil {
+		return err
+	}
+
+	if err := addTool(s.mcp, &mcp.Tool{
+		Name: "ssh_confirm_host_key",
+		Description: "Trust a host key that the failed tool call reported as unconfirmed, then connect. " +
+			"The trust decision belongs to the human: show them the fingerprint and call this " +
+			"only after they confirm, passing the exact fingerprint from that error.",
+	}, s.confirmHostKey); err != nil {
 		return err
 	}
 
@@ -159,7 +178,7 @@ type connectOut struct {
 	Host string `json:"host"`
 }
 
-func (s *Server) connect(ctx context.Context, _ *mcp.CallToolRequest, in connectIn) (*mcp.CallToolResult, connectOut, error) {
+func (s *Server) connect(ctx context.Context, req *mcp.CallToolRequest, in connectIn) (*mcp.CallToolResult, connectOut, error) {
 	opts := sshcfg.Options{
 		Host:           in.Host,
 		User:           in.User,
@@ -171,12 +190,210 @@ func (s *Server) connect(ctx context.Context, _ *mcp.CallToolRequest, in connect
 		ConnectTimeout: time.Duration(in.ConnectTimeoutSeconds) * time.Second,
 		SetEnv:         in.SetEnv,
 	}
-	id, err := s.deps.Conn.Connect(ctx, opts)
+
+	// Ensure derives the id and writes the stanza if it is not there yet, so
+	// the id is stable across the multi-round-trip retry a host key
+	// confirmation causes. It is idempotent: a retry re-takes the flock
+	// briefly to find the stanza already there.
+	id, err := s.deps.Store.Ensure(opts)
 	if err != nil {
 		return nil, connectOut{}, err
 	}
+
+	// Re-validating an id this package just derived is harmless: confirmed()
+	// takes every id as an unvalidated string so the check happens in one
+	// place for every caller, connect included.
+	return confirmed(ctx, s, req, string(id), func(ctx context.Context, id sshcfg.ID) (connectOut, error) {
+		return s.dialConnected(ctx, id, in.Host)
+	})
+}
+
+// dialConnected is the shared tail of every path that establishes a
+// connection: dial the master, sweep stale job directories on the host now
+// that it is reachable, and report the id and host. connect's op closure and
+// confirmHostKey both end here, so a post-dial addition — sweeping jobs was
+// one — cannot land in one path and miss the other.
+func (s *Server) dialConnected(ctx context.Context, id sshcfg.ID, host string) (connectOut, error) {
+	if err := s.deps.Conn.Dial(ctx, id); err != nil {
+		return connectOut{}, err
+	}
 	s.sweepJobs(id)
-	return nil, connectOut{ID: string(id), Host: in.Host}, nil
+	return connectOut{ID: string(id), Host: host}, nil
+}
+
+// hostKeyInputID keys the elicitation in a confirmed call's InputRequests and
+// the answer echoed back in InputResponses.
+const hostKeyInputID = "host_key"
+
+// confirmed validates rawID and runs op against it, intercepting an
+// unconfirmed host key with the confirmation flow (docs/adr/0007). It is the
+// only path that raises or resolves that flow: every remote operation that
+// can lazily re-dial a host (ControlMaster auto) shares it, not just
+// ssh_connect, so a declined or newly-changed key never strands an id that
+// used to work.
+//
+// Being wrapped in the confirmation flow and having the id validated are the
+// same act: op receives the validated id rather than closing over one a
+// caller converted itself, so a handler cannot ship half-guarded — there is
+// no way to call op without ParseID having run first.
+//
+// (free function: methods cannot have type params.)
+//
+// op is safe to run twice, once before a confirmation and once after: the
+// strict handshake fails before any remote command executes, so an
+// unconfirmed key never lets anything partially run.
+func confirmed[Out any](ctx context.Context, s *Server, req *mcp.CallToolRequest, rawID string, op func(context.Context, sshcfg.ID) (Out, error)) (*mcp.CallToolResult, Out, error) {
+	var zero Out
+
+	id, idErr := sshcfg.ParseID(rawID)
+	if idErr != nil {
+		return nil, zero, idErr
+	}
+
+	// promoteAndRun is the shared tail of both paths that trust a key and
+	// then run op: a human's round-2 accept, and SSH_MCP_ACCEPT_NEW. Promote
+	// reporting ErrNothingPending is tolerated, not just here but uniformly
+	// on both paths that reach it: a concurrent accept or a redelivered retry
+	// may have already promoted and consumed the quarantine, and the strict
+	// dial inside op is the real truth test — it succeeds if the key is
+	// genuinely trusted, and refuses (re-raising confirmation with a fresh
+	// capture) if it is not. A fingerprint mismatch is a different error and
+	// still hard-fails.
+	promoteAndRun := func(fingerprint string) (Out, error) {
+		if perr := s.deps.Store.Promote(id, fingerprint); perr != nil && !errors.Is(perr, sshcfg.ErrNothingPending) {
+			return zero, perr
+		}
+		return op(ctx, id)
+	}
+
+	// Round 2: the human already answered the elicitation a prior round
+	// raised. Handling that here, before op runs, means the answer never
+	// waits on a redundant dial against a host that is still unconfirmed —
+	// and a transient failure on that dial can never discard an accept the
+	// human already gave.
+	if res, ok := req.Params.InputResponses[hostKeyInputID].(*mcp.ElicitResult); ok {
+		if res.Action != "accept" {
+			if derr := s.deps.Store.Discard(id); derr != nil {
+				return nil, zero, derr
+			}
+			return nil, zero, fmt.Errorf("host key for %s declined", declineName(s, id))
+		}
+		// RequestState carried the fingerprint shown to the human; Promote
+		// verifies the quarantined key still matches it under its own lock.
+		// An empty RequestState — a client that dropped it — fails that
+		// compare instead of promoting anything.
+		out, err := promoteAndRun(req.Params.RequestState)
+		return nil, out, err
+	}
+
+	out, err := op(ctx, id)
+	if !errors.Is(err, conn.ErrHostKeyUnknown) {
+		return nil, out, err
+	}
+
+	key, capErr := s.deps.Conn.Capture(ctx, id)
+	if capErr != nil {
+		// An empty capture means this was not an unknown-key refusal after
+		// all — a bastion the user's own config refuses, say — and the
+		// capture's own dial error is less truthful than op's original one.
+		return nil, zero, err
+	}
+
+	if s.deps.AcceptNew {
+		slog.Warn("trusting new host key without confirmation",
+			"host", key.Host, "fingerprint", key.Fingerprint, "why", "SSH_MCP_ACCEPT_NEW")
+		out, err = promoteAndRun(key.Fingerprint)
+		return nil, out, err
+	}
+
+	caps := req.Session.InitializeParams().Capabilities
+	if caps == nil || caps.Elicitation == nil {
+		// This client cannot ask the human. The quarantine stays put as the
+		// pending state an explicit ssh_confirm_host_key call resolves.
+		return nil, zero, fmt.Errorf(
+			"host %s presented an unconfirmed %s key with fingerprint %s: "+
+				"show the fingerprint to the human, and once they confirm call "+
+				"ssh_confirm_host_key with id %s and the exact fingerprint",
+			key.Host, key.Type, key.Fingerprint, id)
+	}
+
+	// The elicitation rides as a multi-round-trip input request rather than a
+	// mid-handler Elicit call, which the protocol forbids from 2026-07-28 on.
+	// The SDK bridges older clients by fulfilling the request itself, so both
+	// generations take this one path.
+	//
+	// RequestedSchema is required even though the answer is carried entirely
+	// by Action (accept/decline/cancel), not by anything in this schema's
+	// shape: a client renders a form from it, and this is the shape the
+	// SDK's own conformance test uses for a plain yes/no confirmation.
+	return &mcp.CallToolResult{
+		InputRequests: mcp.InputRequestMap{hostKeyInputID: &mcp.ElicitParams{
+			Message: fmt.Sprintf("The authenticity of host %q can't be established.\n"+
+				"%s key fingerprint is %s.\n"+
+				"Accept to trust this key and connect; decline to refuse.",
+				key.Host, key.Type, key.Fingerprint),
+			RequestedSchema: &jsonschema.Schema{
+				Type:       "object",
+				Properties: map[string]*jsonschema.Schema{"ok": {Type: "boolean"}},
+				Required:   []string{"ok"},
+			},
+		}},
+		RequestState: key.Fingerprint,
+	}, zero, nil
+}
+
+type confirmIn struct {
+	ID          string `json:"id" jsonschema:"connection id from the failed tool call"`
+	Fingerprint string `json:"fingerprint" jsonschema:"the exact SHA256 fingerprint from the failed tool call's error, after the human confirmed it"`
+}
+
+func (s *Server) confirmHostKey(ctx context.Context, _ *mcp.CallToolRequest, in confirmIn) (*mcp.CallToolResult, connectOut, error) {
+	id, err := sshcfg.ParseID(in.ID)
+	if err != nil {
+		return nil, connectOut{}, err
+	}
+	entries, err := s.deps.Store.List()
+	if err != nil {
+		return nil, connectOut{}, err
+	}
+	entry, ok := entryFor(entries, id)
+	if !ok {
+		return nil, connectOut{}, fmt.Errorf("no connection with id %s", id)
+	}
+	// This is the fallback tool for a client that cannot elicit, not an op
+	// confirmed wraps: it makes its own explicit trust-then-dial call.
+	// ErrNothingPending is tolerated for the same reason confirmed tolerates
+	// it — a redelivered confirm may find its promotion already done — and
+	// the strict dial below stays the truth test either way.
+	if perr := s.deps.Store.Promote(id, in.Fingerprint); perr != nil && !errors.Is(perr, sshcfg.ErrNothingPending) {
+		return nil, connectOut{}, perr
+	}
+	out, err := s.dialConnected(ctx, id, entry.Host)
+	return nil, out, err
+}
+
+func entryFor(entries []sshcfg.Entry, id sshcfg.ID) (sshcfg.Entry, bool) {
+	for _, e := range entries {
+		if e.ID == id {
+			return e, true
+		}
+	}
+	return sshcfg.Entry{}, false
+}
+
+// declineName resolves id to the host a decline message should name, falling
+// back to the id when the stanza is absent. The lookup is lazy — List only
+// runs on the decline path, which is the uncommon one — so an accept never
+// pays for it.
+func declineName(s *Server, id sshcfg.ID) string {
+	entries, err := s.deps.Store.List()
+	if err != nil {
+		return string(id)
+	}
+	if entry, ok := entryFor(entries, id); ok {
+		return entry.Host
+	}
+	return string(id)
 }
 
 type execIn struct {
@@ -192,20 +409,22 @@ type execOut struct {
 	Stderr   Stream `json:"stderr"`
 }
 
-func (s *Server) execute(ctx context.Context, _ *mcp.CallToolRequest, in execIn) (*mcp.CallToolResult, execOut, error) {
-	res, err := s.deps.Exec.Run(ctx, sshcfg.ID(in.ID), exec.Request{
-		Command: in.Command,
-		Cwd:     in.Cwd,
-		Timeout: time.Duration(in.TimeoutSeconds) * time.Second,
+func (s *Server) execute(ctx context.Context, req *mcp.CallToolRequest, in execIn) (*mcp.CallToolResult, execOut, error) {
+	return confirmed(ctx, s, req, in.ID, func(ctx context.Context, id sshcfg.ID) (execOut, error) {
+		res, err := s.deps.Exec.Run(ctx, id, exec.Request{
+			Command: in.Command,
+			Cwd:     in.Cwd,
+			Timeout: time.Duration(in.TimeoutSeconds) * time.Second,
+		})
+		if err != nil {
+			return execOut{}, err
+		}
+		return execOut{
+			ExitCode: res.ExitCode,
+			Stdout:   stream(res.Stdout),
+			Stderr:   stream(res.Stderr),
+		}, nil
 	})
-	if err != nil {
-		return nil, execOut{}, err
-	}
-	return nil, execOut{
-		ExitCode: res.ExitCode,
-		Stdout:   stream(res.Stdout),
-		Stderr:   stream(res.Stderr),
-	}, nil
 }
 
 type asyncIn struct {
@@ -217,14 +436,15 @@ type asyncOut struct {
 	JobID string `json:"job_id" jsonschema:"pass this to ssh_job_status or ssh_job_wait"`
 }
 
-func (s *Server) execAsync(ctx context.Context, _ *mcp.CallToolRequest, in asyncIn) (*mcp.CallToolResult, asyncOut, error) {
-	id := sshcfg.ID(in.ID)
-	jobID, err := s.deps.Jobs.Start(ctx, id, in.Command)
-	if err != nil {
-		return nil, asyncOut{}, err
-	}
-	s.watchJob(id, jobID)
-	return nil, asyncOut{JobID: string(jobID)}, nil
+func (s *Server) execAsync(ctx context.Context, req *mcp.CallToolRequest, in asyncIn) (*mcp.CallToolResult, asyncOut, error) {
+	return confirmed(ctx, s, req, in.ID, func(ctx context.Context, id sshcfg.ID) (asyncOut, error) {
+		jobID, err := s.deps.Jobs.Start(ctx, id, in.Command)
+		if err != nil {
+			return asyncOut{}, err
+		}
+		s.watchJob(id, jobID)
+		return asyncOut{JobID: string(jobID)}, nil
+	})
 }
 
 type jobIn struct {
@@ -258,15 +478,17 @@ func toJobOut(j jobs.Job) jobOut {
 	}
 }
 
-func (s *Server) jobStatus(ctx context.Context, _ *mcp.CallToolRequest, in jobIn) (*mcp.CallToolResult, jobOut, error) {
-	job, err := s.deps.Jobs.Status(ctx, sshcfg.ID(in.ID), jobs.ID(in.JobID))
-	if err != nil {
-		return nil, jobOut{}, err
-	}
-	return nil, toJobOut(job), nil
+func (s *Server) jobStatus(ctx context.Context, req *mcp.CallToolRequest, in jobIn) (*mcp.CallToolResult, jobOut, error) {
+	return confirmed(ctx, s, req, in.ID, func(ctx context.Context, id sshcfg.ID) (jobOut, error) {
+		job, err := s.deps.Jobs.Status(ctx, id, jobs.ID(in.JobID))
+		if err != nil {
+			return jobOut{}, err
+		}
+		return toJobOut(job), nil
+	})
 }
 
-func (s *Server) jobWait(ctx context.Context, _ *mcp.CallToolRequest, in jobWaitIn) (*mcp.CallToolResult, jobOut, error) {
+func (s *Server) jobWait(ctx context.Context, req *mcp.CallToolRequest, in jobWaitIn) (*mcp.CallToolResult, jobOut, error) {
 	timeout := time.Duration(in.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = time.Hour
@@ -274,11 +496,13 @@ func (s *Server) jobWait(ctx context.Context, _ *mcp.CallToolRequest, in jobWait
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	job, err := s.deps.Jobs.Wait(ctx, sshcfg.ID(in.ID), jobs.ID(in.JobID))
-	if err != nil {
-		return nil, jobOut{}, err
-	}
-	return nil, toJobOut(job), nil
+	return confirmed(ctx, s, req, in.ID, func(ctx context.Context, id sshcfg.ID) (jobOut, error) {
+		job, err := s.deps.Jobs.Wait(ctx, id, jobs.ID(in.JobID))
+		if err != nil {
+			return jobOut{}, err
+		}
+		return toJobOut(job), nil
+	})
 }
 
 type listOut struct {
@@ -339,16 +563,18 @@ type copyOut struct {
 	Bytes int64 `json:"bytes"`
 }
 
-func (s *Server) copy(ctx context.Context, _ *mcp.CallToolRequest, in copyIn) (*mcp.CallToolResult, copyOut, error) {
+func (s *Server) copy(ctx context.Context, req *mcp.CallToolRequest, in copyIn) (*mcp.CallToolResult, copyOut, error) {
 	dir := xfer.Direction(in.Direction)
 	if dir != xfer.Upload && dir != xfer.Download {
 		return nil, copyOut{}, fmt.Errorf("direction must be %q or %q, got %q", xfer.Upload, xfer.Download, in.Direction)
 	}
-	stats, err := s.deps.Xfer.Copy(ctx, sshcfg.ID(in.ID), dir, in.Source, in.Dest, in.Recursive)
-	if err != nil {
-		return nil, copyOut{}, err
-	}
-	return nil, copyOut{Files: stats.Files, Bytes: stats.Bytes}, nil
+	return confirmed(ctx, s, req, in.ID, func(ctx context.Context, id sshcfg.ID) (copyOut, error) {
+		stats, err := s.deps.Xfer.Copy(ctx, id, dir, in.Source, in.Dest, in.Recursive)
+		if err != nil {
+			return copyOut{}, err
+		}
+		return copyOut{Files: stats.Files, Bytes: stats.Bytes}, nil
+	})
 }
 
 type readIn struct {
@@ -360,12 +586,14 @@ type readOut struct {
 	Content Stream `json:"content"`
 }
 
-func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readIn) (*mcp.CallToolResult, readOut, error) {
-	out, err := s.deps.Xfer.ReadFile(ctx, sshcfg.ID(in.ID), in.Path)
-	if err != nil {
-		return nil, readOut{}, err
-	}
-	return nil, readOut{Content: stream(out)}, nil
+func (s *Server) readFile(ctx context.Context, req *mcp.CallToolRequest, in readIn) (*mcp.CallToolResult, readOut, error) {
+	return confirmed(ctx, s, req, in.ID, func(ctx context.Context, id sshcfg.ID) (readOut, error) {
+		out, err := s.deps.Xfer.ReadFile(ctx, id, in.Path)
+		if err != nil {
+			return readOut{}, err
+		}
+		return readOut{Content: stream(out)}, nil
+	})
 }
 
 type writeIn struct {
@@ -380,7 +608,7 @@ type writeOut struct {
 	Bytes int    `json:"bytes"`
 }
 
-func (s *Server) writeFile(ctx context.Context, _ *mcp.CallToolRequest, in writeIn) (*mcp.CallToolResult, writeOut, error) {
+func (s *Server) writeFile(ctx context.Context, req *mcp.CallToolRequest, in writeIn) (*mcp.CallToolResult, writeOut, error) {
 	var mode fs.FileMode
 	if in.Mode != "" {
 		parsed, err := parseMode(in.Mode)
@@ -389,10 +617,12 @@ func (s *Server) writeFile(ctx context.Context, _ *mcp.CallToolRequest, in write
 		}
 		mode = parsed
 	}
-	if err := s.deps.Xfer.WriteFile(ctx, sshcfg.ID(in.ID), in.Path, in.Content, mode); err != nil {
-		return nil, writeOut{}, err
-	}
-	return nil, writeOut{Path: in.Path, Bytes: len(in.Content)}, nil
+	return confirmed(ctx, s, req, in.ID, func(ctx context.Context, id sshcfg.ID) (writeOut, error) {
+		if err := s.deps.Xfer.WriteFile(ctx, id, in.Path, in.Content, mode); err != nil {
+			return writeOut{}, err
+		}
+		return writeOut{Path: in.Path, Bytes: len(in.Content)}, nil
+	})
 }
 
 func parseMode(s string) (fs.FileMode, error) {
@@ -413,7 +643,9 @@ func (s *Server) watchJob(id sshcfg.ID, jobID jobs.ID) {
 	if s.channel == nil {
 		return
 	}
+	s.bg.Add(1)
 	go func() {
+		defer s.bg.Done()
 		job, err := s.deps.Jobs.Wait(s.watch, id, jobID)
 		if err != nil {
 			slog.Info("job watcher stopped", "job", jobID, "error", err)
@@ -436,7 +668,9 @@ func (s *Server) watchJob(id sshcfg.ID, jobID jobs.ID) {
 // sweepJobs clears out job directories on a host when a connection to it is
 // made, which is the only moment the server can reach that host's filesystem.
 func (s *Server) sweepJobs(id sshcfg.ID) {
+	s.bg.Add(1)
 	go func() {
+		defer s.bg.Done()
 		removed, err := s.deps.Jobs.Sweep(s.watch, id, jobRetention)
 		if err != nil {
 			slog.Debug("job sweep failed", "connection", id, "error", err)

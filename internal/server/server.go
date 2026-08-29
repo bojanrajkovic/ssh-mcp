@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -42,7 +43,13 @@ a path to a local file instead of inline. Read or grep that path directly.
 Use ssh_exec_async for anything long: the job keeps running if the connection
 drops, and ssh_job_wait blocks until it finishes. Job completion also arrives
 as a channel event when the session supports it, but ssh_job_status is always
-authoritative.`
+authoritative.
+
+The first use of a new host stops until a human confirms its key fingerprint,
+raised by whichever tool touches that host first, not only ssh_connect. When
+the client cannot show a confirmation dialog, the tool call returns the
+fingerprint instead: show it to the human, and call ssh_confirm_host_key only
+after they confirm.`
 
 // Deps are the collaborators a server needs.
 type Deps struct {
@@ -52,6 +59,10 @@ type Deps struct {
 	Xfer  Files
 	Jobs  *jobs.Manager
 	Spill *exec.Spiller
+
+	// AcceptNew skips host key confirmation and trusts new keys itself,
+	// logging each fingerprint. SSH_MCP_ACCEPT_NEW sets it.
+	AcceptNew bool
 }
 
 // Server is an MCP server exposing SSH connections as tools.
@@ -66,6 +77,11 @@ type Server struct {
 
 	// watch bounds background job watchers to the server's lifetime.
 	watch context.Context
+
+	// bg counts background goroutines (job watchers, sweeps) so shutdown can
+	// wait for them instead of leaving one mid-write when the process or a
+	// test tears the world down under it.
+	bg sync.WaitGroup
 }
 
 // New builds a server with every tool registered.
@@ -85,11 +101,19 @@ func New(deps Deps) *Server {
 // Run serves MCP over the given streams until ctx is cancelled or the client
 // disconnects.
 func (s *Server) Run(ctx context.Context, r io.ReadCloser, w io.WriteCloser) error {
-	s.watch = ctx
+	// The watch context is cancelable independently of ctx: a client that
+	// disconnects returns from mcp.Run without ctx being done, and background
+	// work must still be stopped and drained or Run would hang on a job
+	// watcher that runs for hours.
+	watchCtx, stop := context.WithCancel(ctx)
+	s.watch = watchCtx
 	s.channel = channel.Wrap(&mcp.IOTransport{Reader: r, Writer: w})
 
 	s.sweepSpill()
-	return s.mcp.Run(ctx, s.channel)
+	err := s.mcp.Run(ctx, s.channel)
+	stop()
+	s.bg.Wait()
+	return err
 }
 
 // MCP exposes the underlying server, for tests that drive it directly.

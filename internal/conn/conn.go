@@ -38,22 +38,93 @@ type Status struct {
 	Live    bool
 }
 
-// Connect ensures a stanza for o and establishes its control master, returning
-// the identifier. It is idempotent: connecting twice with equal options
-// returns the same identifier and reuses the existing master.
+// Dial establishes the control master for an existing stanza. The server
+// pairs it with Store.Ensure — dial after ensuring the stanza exists — and
+// the host key confirmation flow calls it directly, after promoting a key,
+// when only the identifier is at hand.
 //
 // The master is established by running a trivial remote command rather than by
-// starting a bare master with -N, so a successful Connect means authentication
+// starting a bare master with -N, so a successful Dial means authentication
 // worked and the remote runs commands.
-func (c *Connector) Connect(ctx context.Context, o sshcfg.Options) (sshcfg.ID, error) {
-	id, err := c.store.Ensure(o)
-	if err != nil {
-		return "", err
-	}
+func (c *Connector) Dial(ctx context.Context, id sshcfg.ID) error {
 	if _, err := c.run(ctx, string(id), "true"); err != nil {
-		return "", fmt.Errorf("connect %s: %w", id, err)
+		return fmt.Errorf("connect %s: %w", id, err)
 	}
-	return id, nil
+	return nil
+}
+
+// Key is one captured host key, described the way `ssh-keygen -lf` would.
+type Key struct {
+	Host        string // the known_hosts pattern the key was recorded under
+	Type        string // ED25519, RSA, ...
+	Fingerprint string // SHA256:...
+}
+
+// Capture dry-runs id's connection so an unconfirmed host key lands in its
+// quarantine file, and reports that key. ControlPath=none alone is enough to
+// leave no control master behind: a master established here would let a
+// later strict connect multiplex over a connection that was never verified.
+//
+// Every authentication method is disabled too, but ssh always offers "none"
+// on top of whatever methods are configured. A server that accepts it opens a
+// session anyway, despite every method above being turned off, so the
+// stanza's SetEnv values would still ride along into it. Command-line SetEnv
+// is evaluated before the config file, and the keyword is first-obtained-wins
+// (verified on the wire), so the dummy pair below displaces whatever the
+// stanza would have sent: a "none"-auth server gets a session that carries
+// only SSH_MCP_CAPTURE=1, no agent, and nothing else.
+//
+// The run therefore always fails. A capture succeeds when the quarantine
+// holds a key afterward, regardless of the run's exit status.
+func (c *Connector) Capture(ctx context.Context, id sshcfg.ID) (Key, error) {
+	if err := c.store.Discard(id); err != nil {
+		return Key{}, fmt.Errorf("capture %s: clear quarantine: %w", id, err)
+	}
+	_, runErr := c.run(ctx,
+		"-o", "UserKnownHostsFile="+c.store.CaptureKnownHosts(id),
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ControlPath=none",
+		"-o", "HashKnownHosts=no",
+		"-o", "PubkeyAuthentication=no",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "ForwardAgent=no",
+		"-o", "SetEnv=SSH_MCP_CAPTURE=1",
+		string(id), "true")
+	key, err := c.Pending(id)
+	if err != nil && runErr != nil {
+		return Key{}, fmt.Errorf("capture %s: %w", id, runErr)
+	}
+	return key, err
+}
+
+// Pending returns the quarantined key awaiting confirmation for id. The
+// quarantine file being absent means nothing is pending, which is its own
+// error (sshcfg.ErrNothingPending) rather than an empty Key.
+//
+// The fingerprint is computed in-process from the recorded known_hosts line;
+// nothing here shells out.
+func (c *Connector) Pending(id sshcfg.ID) (Key, error) {
+	line, err := c.store.PendingLine(id)
+	if err != nil {
+		// A corrupt quarantine (anything but one line) is discarded so the
+		// next attempt starts clean instead of tripping the same error
+		// forever; nothing pending needs no discard, the file is already
+		// gone. Pending runs unlocked, unlike Store.Promote, so the discard
+		// takes its own lock here rather than reusing one already held.
+		if !errors.Is(err, sshcfg.ErrNothingPending) {
+			if derr := c.store.Discard(id); derr != nil {
+				return Key{}, fmt.Errorf("discard quarantine for %s: %w", id, derr)
+			}
+		}
+		return Key{}, err
+	}
+
+	host, keyType, fingerprint, err := sshcfg.ParseHostKeyLine(line)
+	if err != nil {
+		return Key{}, fmt.Errorf("parse quarantined key: %w", err)
+	}
+	return Key{Host: host, Type: keyType, Fingerprint: fingerprint}, nil
 }
 
 // Check reports whether a control master is currently running. A connection

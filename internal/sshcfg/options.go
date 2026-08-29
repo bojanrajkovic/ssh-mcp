@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -65,6 +66,28 @@ const (
 	idPrefix    = "conn_"
 	idHexLen    = 8
 )
+
+// IDPattern is the anchored regex every valid ID matches: idPrefix followed by
+// exactly idHexLen lowercase hex characters. Tool schemas advertise it as the
+// "id" property's pattern (internal/server/tools.go), and ParseID validates
+// against the same compiled expression, so the two cannot drift apart.
+var IDPattern = fmt.Sprintf("^%s[0-9a-f]{%d}$", idPrefix, idHexLen)
+
+var idRegexp = regexp.MustCompile(IDPattern)
+
+// ParseID validates that s has the exact shape Derive produces: idPrefix
+// followed by exactly idHexLen lowercase hex characters.
+//
+// Callers hand ids back to confirmHostKey as free-form strings. Without this
+// check one flows into filepath.Join, where "../../etc" escapes the store
+// directory, and into ssh's argv, where a leading "-" parses as a flag rather
+// than a Host.
+func ParseID(s string) (ID, error) {
+	if !idRegexp.MatchString(s) {
+		return "", fmt.Errorf("sshcfg: %q is not a connection id", s)
+	}
+	return ID(s), nil
+}
 
 // Validate reports whether the options can be rendered safely.
 //

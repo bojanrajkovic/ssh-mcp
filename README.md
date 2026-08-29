@@ -28,6 +28,7 @@ mise use -g github:bojanrajkovic/ssh-mcp   # or: go install github.com/bojanrajk
 | Tool | Does |
 |------|------|
 | `ssh_connect` | Open or reuse a connection, returning an id. Idempotent. |
+| `ssh_confirm_host_key` | Trust a first-contact host key after a human confirmed its fingerprint. |
 | `ssh_exec` | Run a command; returns exit code, stdout and stderr separately. |
 | `ssh_exec_async` | Start a command that survives the connection dropping. |
 | `ssh_job_status` / `ssh_job_wait` | Peek at a job, or block until it finishes. |
@@ -56,14 +57,27 @@ carries:
 | `SSH_MCP_SPILL_DIR` | OS user cache dir + `/ssh-mcp/spill` |
 | `SSH_MCP_SPILL_BYTES` | `10240` |
 | `SSH_MCP_SSH_CONFIG` | `~/.ssh/config` |
+| `SSH_MCP_ACCEPT_NEW` | unset |
 
 "OS user config/cache dir" is Go's `os.UserConfigDir()` / `os.UserCacheDir()`:
 `~/.config` and `~/.cache` on Linux (or `$XDG_CONFIG_HOME` / `$XDG_CACHE_HOME`
 when set), `~/Library/Application Support` and `~/Library/Caches` on macOS.
 
 The server writes its own `ssh_config` and includes yours; yours is never
-modified. First-use host keys are recorded in the server's own `known_hosts`,
+modified. Host keys the server accepts are recorded in its own `known_hosts`,
 so an agent's trust decisions never land in your trust store.
+
+## Host keys
+
+The first use of a new host — whichever tool touches it — stops until a human
+confirms its key fingerprint, the same decision interactive `ssh` asks for.
+Clients that support MCP elicitation show a confirmation dialog. For clients
+that do not, the tool call returns the fingerprint and the agent calls
+`ssh_confirm_host_key` once the human confirms. Hosts already trusted in your
+own `known_hosts` connect without any prompt, and changed keys are always
+refused. Set `SSH_MCP_ACCEPT_NEW` to any value to skip confirmation and trust
+new keys automatically; each fingerprint is still logged. See
+[ADR 0007](docs/adr/0007-host-keys-are-confirmed-before-trust.md).
 
 Register it with your MCP client:
 

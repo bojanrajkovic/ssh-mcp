@@ -3,6 +3,9 @@ package sshcfg
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +14,12 @@ import (
 	"syscall"
 	"time"
 )
+
+// ErrNothingPending means a quarantine file does not exist: nothing is
+// waiting on confirmation for that id. It is wrapped with the id for context
+// (see quarantineLine), so a caller can match it with errors.Is while the
+// message still names the connection.
+var ErrNothingPending = errors.New("no host key pending")
 
 const (
 	// controlPersist keeps an idle master alive long enough to be reused
@@ -70,7 +79,55 @@ func Open(dir, userConfig string) (*Store, error) {
 			return nil, fmt.Errorf("sshcfg: create %s: %w", d, err)
 		}
 	}
+	if err := s.migrateStrictChecking(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// legacyStrictChecking is the keyword pair stanzas rendered before host key
+// confirmation existed (docs/adr/0007).
+const legacyStrictChecking = "StrictHostKeyChecking accept-new"
+
+// migrateStrictChecking rewrites stanzas written before host key confirmation
+// existed. Those said accept-new, which silently trusts any new key — the
+// behavior confirmation replaces.
+//
+// This runs once per server startup, so one flock is nothing to worry about —
+// not worth the double read a lock-free fast path used to buy.
+func (s *Store) migrateStrictChecking() error {
+	return s.withLock(func() error {
+		data, err := os.ReadFile(s.ConfigPath())
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("sshcfg: read config: %w", err)
+		}
+		updated := migrateStrictCheckingLines(string(data))
+		if updated == string(data) {
+			return nil
+		}
+		return s.writeAtomic(s.ConfigPath(), updated)
+	})
+}
+
+// migrateStrictCheckingLines rewrites accept-new to yes, but only on a line
+// that is exactly the StrictHostKeyChecking keyword pair once trimmed.
+//
+// An unanchored replace over the whole file would also rewrite the literal
+// text if it ever appeared inside a SetEnv value: ssh_config puts no
+// syntactic limit on what a value may contain.
+func migrateStrictCheckingLines(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != legacyStrictChecking {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + "StrictHostKeyChecking yes"
+	}
+	return strings.Join(lines, "\n")
 }
 
 // checkControlPathFits rejects a directory whose control sockets could not
@@ -95,6 +152,152 @@ func (s *Store) ConfigPath() string { return filepath.Join(s.dir, "config") }
 // known_hosts is read as well but never written, so an agent's trust decisions
 // never land in it.
 func (s *Store) KnownHostsPath() string { return filepath.Join(s.dir, "known_hosts") }
+
+// QuarantinePath holds the key captured on a connection's first contact,
+// before anything trusts it. Nothing reads this file as trust: it exists so
+// the key can be shown to a human before promotion.
+func (s *Store) QuarantinePath(id ID) string {
+	return filepath.Join(s.dir, string(id)+".quarantine")
+}
+
+// CaptureKnownHosts is the UserKnownHostsFile value for a capture run: the
+// quarantine first so ssh records a new key there, then both trusted files so
+// a key that is already trusted records nothing.
+func (s *Store) CaptureKnownHosts(id ID) string {
+	return quote(s.QuarantinePath(id)) + " " + quote(s.KnownHostsPath()) + " " +
+		quote(userKnownHosts(s.userConfig))
+}
+
+// keyTypeNames maps a known_hosts key type field to the short name ssh-keygen
+// -lf reports. A type this server has never seen falls back to the raw field,
+// since new algorithms should still fingerprint rather than fail closed.
+var keyTypeNames = map[string]string{
+	"ssh-ed25519":                        "ED25519",
+	"ssh-rsa":                            "RSA",
+	"ecdsa-sha2-nistp256":                "ECDSA",
+	"ecdsa-sha2-nistp384":                "ECDSA",
+	"ecdsa-sha2-nistp521":                "ECDSA",
+	"sk-ssh-ed25519@openssh.com":         "ED25519-SK",
+	"sk-ecdsa-sha2-nistp256@openssh.com": "ECDSA-SK",
+}
+
+// ParseHostKeyLine parses one known_hosts line into the host pattern, key
+// type, and fingerprint a human recognizes.
+//
+// The fingerprint is computed in-process rather than by shelling out to
+// ssh-keygen -lf: it is SHA256 of the decoded key blob, base64-encoded
+// without padding and prefixed "SHA256:", which is the exact value ssh-keygen
+// reports. Doing this in Go keeps confirmation from depending on a second
+// binary being on PATH.
+func ParseHostKeyLine(line string) (hostPattern, keyType, fingerprint string, err error) {
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return "", "", "", fmt.Errorf("sshcfg: %q is not a known_hosts line", line)
+	}
+	blob, err := base64.StdEncoding.DecodeString(fields[2])
+	if err != nil {
+		return "", "", "", fmt.Errorf("sshcfg: decode key blob: %w", err)
+	}
+	sum := sha256.Sum256(blob)
+	fingerprint = "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+	keyType = fields[1]
+	if name, ok := keyTypeNames[keyType]; ok {
+		keyType = name
+	}
+	return fields[0], keyType, fingerprint, nil
+}
+
+// quarantineLine is the single authority on the quarantine file's shape: read,
+// trim, and require exactly the one line a capture ever writes. Both errors it
+// can produce — nothing pending, or a corrupt multi-key file — are formatted
+// here and nowhere else, so Promote and PendingLine can never drift apart on
+// what those states mean.
+func (s *Store) quarantineLine(id ID) (string, error) {
+	data, err := os.ReadFile(s.QuarantinePath(id))
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("no host key pending for %s: %w", id, ErrNothingPending)
+	}
+	if err != nil {
+		return "", fmt.Errorf("sshcfg: read quarantine: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Exactly one pending key per connection. A capture records the single
+	// key ssh negotiated; more than one means something else wrote the file,
+	// and starting over is safer than guessing which was seen.
+	if len(lines) != 1 {
+		return "", fmt.Errorf("quarantine for %s held %d keys; run ssh_connect again", id, len(lines))
+	}
+	return lines[0], nil
+}
+
+// PendingLine returns id's quarantined known_hosts line, or ErrNothingPending
+// when nothing is quarantined. It runs unlocked, the same as the read it
+// replaces: the quarantine file's only writer is a single ssh invocation
+// (Capture), so nothing here contends with Promote's locked read-modify-write.
+func (s *Store) PendingLine(id ID) (string, error) {
+	return s.quarantineLine(id)
+}
+
+// Promote verifies id's quarantined key against wantFingerprint and, on a
+// match, moves it into the server's known_hosts — the step that makes it
+// trusted. The quarantine file is consumed either way it can be: promotion
+// removes it, and a corrupt quarantine (anything but one line) is discarded
+// rather than left to confuse the next attempt.
+//
+// The compare happens under the same lock as the write, not before it. That
+// is the point: nothing can replace the quarantine file between the fingerprint
+// a human confirmed and the bytes actually appended to known_hosts.
+func (s *Store) Promote(id ID, wantFingerprint string) error {
+	return s.withLock(func() error {
+		line, err := s.quarantineLine(id)
+		if err != nil {
+			if !errors.Is(err, ErrNothingPending) {
+				_ = os.Remove(s.QuarantinePath(id))
+			}
+			return err
+		}
+
+		_, _, fingerprint, err := ParseHostKeyLine(line)
+		if err != nil {
+			return fmt.Errorf("sshcfg: parse quarantined key: %w", err)
+		}
+		if fingerprint != wantFingerprint {
+			// The quarantine stays. The correct fingerprint never appears in
+			// this error: it is exactly the value a caller probing for it
+			// would be trying to learn.
+			return fmt.Errorf("fingerprint does not match the key pending for %s", id)
+		}
+
+		existing, err := os.ReadFile(s.KnownHostsPath())
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("sshcfg: read known_hosts: %w", err)
+		}
+		// A file this package didn't just write may not end in a newline;
+		// without this guard the promoted line would be appended onto the
+		// same line as the last existing one.
+		content := string(existing)
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		if err := s.writeAtomic(s.KnownHostsPath(), content+line+"\n"); err != nil {
+			return err
+		}
+		return os.Remove(s.QuarantinePath(id))
+	})
+}
+
+// Discard removes id's pending key without trusting it. Every quarantine
+// deletion outside Promote goes through this, so deletion is serialized the
+// same way promotion is and never races a concurrent Promote.
+func (s *Store) Discard(id ID) error {
+	return s.withLock(func() error {
+		if err := os.Remove(s.QuarantinePath(id)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("sshcfg: discard quarantine: %w", err)
+		}
+		return nil
+	})
+}
 
 // ControlDir holds ControlMaster sockets.
 //
@@ -249,8 +452,16 @@ func (s *Store) renderStanza(id ID, o Options) string {
 	if o.ConnectTimeout > 0 {
 		fmt.Fprintf(&b, "    ConnectTimeout %d\n", int(o.ConnectTimeout.Seconds()))
 	}
-	for _, k := range sortedKeys(o.SetEnv) {
-		fmt.Fprintf(&b, "    SetEnv %s\n", quote(k+"="+o.SetEnv[k]))
+	// OpenSSH applies first-obtained-wins to the whole SetEnv keyword, not per
+	// pair: a second SetEnv line is ignored outright, silently dropping every
+	// variable after the first (verified on the wire). All pairs render on
+	// the one line ssh actually reads, each individually quoted.
+	if len(o.SetEnv) > 0 {
+		pairs := make([]string, 0, len(o.SetEnv))
+		for _, k := range sortedKeys(o.SetEnv) {
+			pairs = append(pairs, quote(k+"="+o.SetEnv[k]))
+		}
+		fmt.Fprintf(&b, "    SetEnv %s\n", strings.Join(pairs, " "))
 	}
 	// Without BatchMode a passphrase-protected key or a password-auth host
 	// makes ssh prompt, and a server with no tty has nothing to answer with.
@@ -259,9 +470,10 @@ func (s *Store) renderStanza(id ID, o Options) string {
 	b.WriteString("    ControlMaster auto\n")
 	fmt.Fprintf(&b, "    ControlPath %s\n", quote(s.ControlPath(id)))
 	fmt.Fprintf(&b, "    ControlPersist %s\n", controlPersist)
-	// accept-new, not ask: a tty-less server cannot answer a prompt, and ask
-	// is the default. Changed keys are still refused.
-	b.WriteString("    StrictHostKeyChecking accept-new\n")
+	// yes, not accept-new: a key nothing trusts yet must be confirmed before
+	// use (docs/adr/0007), and accept-new would trust it silently. Changed
+	// keys are refused either way.
+	b.WriteString("    StrictHostKeyChecking yes\n")
 	// The server's file is first, so new keys are recorded there; the user's
 	// is read for trust it already established.
 	fmt.Fprintf(&b, "    UserKnownHostsFile %s %s\n",

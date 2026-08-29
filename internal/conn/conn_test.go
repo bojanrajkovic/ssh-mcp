@@ -2,6 +2,7 @@ package conn
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,10 +35,15 @@ func TestClassify(t *testing.T) {
 			"@@@@@@@@@@@@@@@@@@@@\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.",
 			ErrHostKeyChanged,
 		},
+		"unknown host key": {
+			"No ED25519 host key is known for [example.com]:22 and you have requested " +
+				"strict checking.\nHost key verification failed.",
+			ErrHostKeyUnknown,
+		},
 		"permission denied":   {"user@host: Permission denied (publickey).", ErrAuth},
 		"too many auth":       {"Received disconnect from 10.0.0.1: Too many authentication failures", ErrAuth},
 		"no matching hostkey": {"Unable to negotiate: no matching host key type found.", ErrAuth},
-		"verification failed": {"Host key verification failed.", ErrAuth},
+		"verification failed": {"Host key verification failed.", ErrHostKeyUnknown},
 		"refused":             {"ssh: connect to host h port 22: Connection refused", ErrUnreachable},
 		"timed out":           {"ssh: connect to host h port 22: Connection timed out", ErrUnreachable},
 		"dns":                 {"ssh: Could not resolve hostname nope: Name or service not known", ErrUnreachable},
@@ -58,8 +64,8 @@ func TestClassify(t *testing.T) {
 }
 
 // A changed host key also prints "Host key verification failed", which would
-// otherwise classify as an auth failure and send someone chasing the wrong
-// problem.
+// otherwise classify as an unknown key and route a possible MITM into the
+// confirmation flow instead of a hard refusal.
 func TestClassifyPrefersChangedHostKeyOverAuth(t *testing.T) {
 	stderr := "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed."
 	if got := Classify(stderr); !errors.Is(got, ErrHostKeyChanged) {
@@ -73,9 +79,12 @@ func TestConnectPassesServerConfigAndRunsRemoteCommand(t *testing.T) {
 	fake := sshtest.InstallFakeSSH(t, sshtest.Reply{Exit: 0})
 	c, store := newConnector(t)
 
-	id, err := c.Connect(t.Context(), sshcfg.Options{Host: "example.com", User: "deploy"})
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com", User: "deploy"})
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := c.Dial(t.Context(), id); err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
 
 	want := []string{"-F", store.ConfigPath(), string(id), "true"}
@@ -86,19 +95,22 @@ func TestConnectPassesServerConfigAndRunsRemoteCommand(t *testing.T) {
 
 func TestConnectIsIdempotent(t *testing.T) {
 	sshtest.InstallFakeSSH(t, sshtest.Reply{Exit: 0})
-	c, _ := newConnector(t)
+	c, store := newConnector(t)
 	o := sshcfg.Options{Host: "example.com", User: "deploy"}
 
-	first, err := c.Connect(t.Context(), o)
+	first, err := store.Ensure(o)
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Ensure: %v", err)
 	}
-	second, err := c.Connect(t.Context(), o)
+	second, err := store.Ensure(o)
 	if err != nil {
-		t.Fatalf("second Connect: %v", err)
+		t.Fatalf("second Ensure: %v", err)
 	}
 	if first != second {
-		t.Errorf("ids differ across connects: %q then %q", first, second)
+		t.Errorf("ids differ across Ensure calls: %q then %q", first, second)
+	}
+	if err := c.Dial(t.Context(), first); err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
 }
 
@@ -114,11 +126,15 @@ func TestConnectSurfacesSentinels(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			sshtest.InstallFakeSSH(t, sshtest.Reply{Stderr: tc.stderr, Exit: 255})
-			c, _ := newConnector(t)
+			c, store := newConnector(t)
 
-			_, err := c.Connect(t.Context(), sshcfg.Options{Host: "example.com"})
+			id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+			if err != nil {
+				t.Fatalf("Ensure: %v", err)
+			}
+			err = c.Dial(t.Context(), id)
 			if !errors.Is(err, tc.want) {
-				t.Fatalf("Connect error = %v, want %v", err, tc.want)
+				t.Fatalf("Dial error = %v, want %v", err, tc.want)
 			}
 			// The original diagnostic has to survive, since classification is
 			// heuristic and the raw text is what a human will need.
@@ -126,6 +142,92 @@ func TestConnectSurfacesSentinels(t *testing.T) {
 				t.Errorf("error %q dropped the ssh diagnostic", err)
 			}
 		})
+	}
+}
+
+// A capture must never leave a control master behind: a later strict connect
+// would multiplex over it and skip verification entirely. The flag order is
+// the contract, so it is pinned exactly.
+func TestCapturePassesOverridesAndFailsWithoutAKey(t *testing.T) {
+	fake := sshtest.InstallFakeSSH(t, sshtest.Reply{Exit: 0})
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	// The fake records nothing into quarantine, so the capture reports no key.
+	if _, err := c.Capture(t.Context(), id); err == nil {
+		t.Error("Capture with nothing recorded succeeded")
+	}
+
+	want := []string{
+		"-F", store.ConfigPath(),
+		"-o", "UserKnownHostsFile=" + store.CaptureKnownHosts(id),
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ControlPath=none",
+		"-o", "HashKnownHosts=no",
+		"-o", "PubkeyAuthentication=no",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "ForwardAgent=no",
+		"-o", "SetEnv=SSH_MCP_CAPTURE=1",
+		string(id), "true",
+	}
+	if diff := cmp.Diff(want, fake.LastCall(t)); diff != "" {
+		t.Errorf("ssh arguments (-want +got):\n%s", diff)
+	}
+}
+
+func TestPendingParsesTheQuarantinedKey(t *testing.T) {
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if werr := os.WriteFile(store.QuarantinePath(id), []byte(sshtest.PairedHostKeyLine+"\n"), 0o600); werr != nil {
+		t.Fatalf("write quarantine: %v", werr)
+	}
+
+	key, err := c.Pending(id)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	want := Key{Host: "example.com", Type: "ED25519", Fingerprint: sshtest.PairedFingerprint}
+	if diff := cmp.Diff(want, key); diff != "" {
+		t.Errorf("key (-want +got):\n%s", diff)
+	}
+}
+
+// More than one quarantined key means the file was not written by a capture,
+// and guessing which key the human saw would defeat the confirmation.
+func TestPendingRefusesMultipleKeys(t *testing.T) {
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := os.WriteFile(store.QuarantinePath(id), []byte(sshtest.PairedHostKeyLine+"\n"+sshtest.PairedHostKeyLine+"\n"), 0o600); err != nil {
+		t.Fatalf("write quarantine: %v", err)
+	}
+
+	if _, err := c.Pending(id); err == nil {
+		t.Fatal("Pending with two keys succeeded")
+	}
+	if _, err := os.Stat(store.QuarantinePath(id)); !os.IsNotExist(err) {
+		t.Errorf("suspect quarantine survived (stat err: %v)", err)
+	}
+}
+
+func TestPendingWithNoQuarantineSaysSo(t *testing.T) {
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if _, err := c.Pending(id); err == nil ||
+		!strings.Contains(err.Error(), "no host key pending") {
+		t.Errorf("Pending = %v, want a no-key-pending error", err)
 	}
 }
 

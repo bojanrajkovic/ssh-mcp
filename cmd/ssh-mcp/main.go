@@ -94,13 +94,19 @@ func build() (server.Deps, error) {
 	connector := conn.New(store)
 	executor := exec.New(connector, store, spill)
 
+	acceptNew := os.Getenv("SSH_MCP_ACCEPT_NEW") != ""
+	if acceptNew {
+		slog.Warn("SSH_MCP_ACCEPT_NEW is set; new host keys will be trusted without confirmation")
+	}
+
 	return server.Deps{
-		Store: store,
-		Conn:  connector,
-		Exec:  executor,
-		Xfer:  xfer.New(store, executor),
-		Jobs:  jobs.New(executor),
-		Spill: spill,
+		Store:     store,
+		Conn:      connector,
+		Exec:      executor,
+		Xfer:      xfer.New(store, executor),
+		Jobs:      jobs.New(executor),
+		Spill:     spill,
+		AcceptNew: acceptNew,
 	}, nil
 }
 

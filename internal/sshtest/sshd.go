@@ -140,6 +140,13 @@ func (s *Server) SSHArgs(extra ...string) []string {
 // Target is the user@host the server accepts.
 func (s *Server) Target() string { return s.User + "@127.0.0.1" }
 
+// Trust copies this server's host key into knownHostsPath, standing in for
+// the confirmation a human would give on first contact.
+func (s *Server) Trust(t *testing.T, knownHostsPath string) {
+	t.Helper()
+	writeFile(t, knownHostsPath, readFile(t, s.KnownHosts))
+}
+
 // Options describe this server as a connection, for tests that drive the real
 // configuration and connection code rather than ssh directly.
 func (s *Server) Options() sshcfg.Options {
