@@ -145,6 +145,7 @@ Individual tasks:
 | `mise run test` | Unit tests with race detector, prints total coverage |
 | `mise run test-integration` | Tests against a real sshd (needs `sshd` installed) |
 | `mise run vuln` | govulncheck over dependencies and stdlib |
+| `mise run audit` | Audit GitHub Actions workflows with zizmor |
 | `mise run build` | Build `./ssh-mcp` with version stamped |
 | `mise run dist` | Cross-compile linux and darwin binaries into `dist/` |
 
