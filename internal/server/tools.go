@@ -321,12 +321,22 @@ func confirmed[Out any](ctx context.Context, s *Server, req *mcp.CallToolRequest
 	// mid-handler Elicit call, which the protocol forbids from 2026-07-28 on.
 	// The SDK bridges older clients by fulfilling the request itself, so both
 	// generations take this one path.
+	//
+	// RequestedSchema is required even though the answer is carried entirely
+	// by Action (accept/decline/cancel), not by anything in this schema's
+	// shape: a client renders a form from it, and this is the shape the
+	// SDK's own conformance test uses for a plain yes/no confirmation.
 	return &mcp.CallToolResult{
 		InputRequests: mcp.InputRequestMap{hostKeyInputID: &mcp.ElicitParams{
 			Message: fmt.Sprintf("The authenticity of host %q can't be established.\n"+
 				"%s key fingerprint is %s.\n"+
 				"Accept to trust this key and connect; decline to refuse.",
 				key.Host, key.Type, key.Fingerprint),
+			RequestedSchema: &jsonschema.Schema{
+				Type:       "object",
+				Properties: map[string]*jsonschema.Schema{"ok": {Type: "boolean"}},
+				Required:   []string{"ok"},
+			},
 		}},
 		RequestState: key.Fingerprint,
 	}, zero, nil
