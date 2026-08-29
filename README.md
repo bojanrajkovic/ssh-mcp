@@ -94,16 +94,16 @@ unless the session opts in, so `ssh_job_wait` and `ssh_job_status` stay
 authoritative regardless.
 
 No server-side configuration is needed — register `ssh` as in
-[Configuration](#configuration), then launch Claude Code with the server name
+[Configuration](#configuration), then launch Claude Code with `server:<name>`
 in `--dangerously-load-development-channels`:
 
 ```bash
-claude --dangerously-load-development-channels ssh
+claude --dangerously-load-development-channels server:ssh
 ```
 
-Don't also pass `--channels ssh` for the same server. Claude Code keeps one
-channel entry per server name and matches on the first one found; a plain
-`--channels` entry shadows the dev entry added by
+Don't also pass `--channels server:ssh` for the same server. Claude Code
+keeps one channel entry per server name and matches on the first one found; a
+plain `--channels` entry shadows the dev entry added by
 `--dangerously-load-development-channels`, and notifications stay silently
 dropped with no indication why.
 
@@ -117,7 +117,7 @@ sequenceDiagram
     ssh-mcp-->>Agent: job_id
     Note over ssh-mcp: job runs in the background
     ssh-mcp->>Client: notifications/claude/channel (on completion)
-    alt --dangerously-load-development-channels ssh
+    alt --dangerously-load-development-channels server:ssh
         Client->>Agent: channel event
     else not enabled
         Client-xClient: dropped, no error
