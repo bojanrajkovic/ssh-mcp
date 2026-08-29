@@ -57,10 +57,14 @@ carries:
 
 | Variable | Default |
 |----------|---------|
-| `SSH_MCP_CONFIG_DIR` | `~/.config/ssh-mcp` |
-| `SSH_MCP_SPILL_DIR` | `~/.cache/ssh-mcp/spill` |
+| `SSH_MCP_CONFIG_DIR` | OS user config dir + `/ssh-mcp` |
+| `SSH_MCP_SPILL_DIR` | OS user cache dir + `/ssh-mcp/spill` |
 | `SSH_MCP_SPILL_BYTES` | `10240` |
 | `SSH_MCP_SSH_CONFIG` | `~/.ssh/config` |
+
+"OS user config/cache dir" is Go's `os.UserConfigDir()` / `os.UserCacheDir()`:
+`~/.config` and `~/.cache` on Linux (or `$XDG_CONFIG_HOME` / `$XDG_CACHE_HOME`
+when set), `~/Library/Application Support` and `~/Library/Caches` on macOS.
 
 The server writes its own `ssh_config` and includes yours; yours is never
 modified. First-use host keys are recorded in the server's own `known_hosts`,
