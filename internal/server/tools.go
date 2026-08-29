@@ -633,7 +633,9 @@ func (s *Server) watchJob(id sshcfg.ID, jobID jobs.ID) {
 	if s.channel == nil {
 		return
 	}
+	s.bg.Add(1)
 	go func() {
+		defer s.bg.Done()
 		job, err := s.deps.Jobs.Wait(s.watch, id, jobID)
 		if err != nil {
 			slog.Info("job watcher stopped", "job", jobID, "error", err)
@@ -656,7 +658,9 @@ func (s *Server) watchJob(id sshcfg.ID, jobID jobs.ID) {
 // sweepJobs clears out job directories on a host when a connection to it is
 // made, which is the only moment the server can reach that host's filesystem.
 func (s *Server) sweepJobs(id sshcfg.ID) {
+	s.bg.Add(1)
 	go func() {
+		defer s.bg.Done()
 		removed, err := s.deps.Jobs.Sweep(s.watch, id, jobRetention)
 		if err != nil {
 			slog.Debug("job sweep failed", "connection", id, "error", err)

@@ -45,8 +45,15 @@ func sessionWith(t *testing.T, deps Deps, opts *mcp.ClientOptions) *mcp.ClientSe
 	ctx := t.Context()
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 
+	// Driving mcp.Run directly bypasses Server.Run, which is what wires the
+	// watch context and drains background work on shutdown. Wire watch to the
+	// test context here and drain in cleanup, or a job sweep spawned at the
+	// tail of a test keeps invoking the fake ssh while t.TempDir's RemoveAll
+	// is deleting the directory out from under it.
+	srv := New(deps)
+	srv.watch = ctx
 	served := make(chan error, 1)
-	go func() { served <- New(deps).MCP().Run(ctx, serverTransport) }()
+	go func() { served <- srv.MCP().Run(ctx, serverTransport) }()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, opts)
 	cs, err := client.Connect(ctx, clientTransport, nil)
@@ -56,6 +63,7 @@ func sessionWith(t *testing.T, deps Deps, opts *mcp.ClientOptions) *mcp.ClientSe
 	t.Cleanup(func() {
 		_ = cs.Close()
 		<-served
+		srv.bg.Wait()
 	})
 	return cs
 }
