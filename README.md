@@ -81,6 +81,44 @@ Register it with your MCP client:
 Linux and macOS. Windows is not supported: `ControlMaster` sockets do not exist
 there.
 
+## Enabling channel notifications
+
+`ssh_exec_async` can push a completion event to the client instead of making
+the agent poll. Delivery is best effort: the client drops the event silently
+unless the session opts in, so `ssh_job_wait` and `ssh_job_status` stay
+authoritative regardless.
+
+No server-side configuration is needed — register `ssh` as in
+[Configuration](#configuration), then launch Claude Code with the server name
+in `--dangerously-load-development-channels`:
+
+```bash
+claude --dangerously-load-development-channels ssh
+```
+
+Don't also pass `--channels ssh` for the same server. Claude Code keeps one
+channel entry per server name and matches on the first one found; a plain
+`--channels` entry shadows the dev entry added by
+`--dangerously-load-development-channels`, and notifications stay silently
+dropped with no indication why.
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant ssh-mcp
+    participant Client as Claude Code
+
+    Agent->>ssh-mcp: ssh_exec_async
+    ssh-mcp-->>Agent: job_id
+    Note over ssh-mcp: job runs in the background
+    ssh-mcp->>Client: notifications/claude/channel (on completion)
+    alt --dangerously-load-development-channels ssh
+        Client->>Agent: channel event
+    else not enabled
+        Client-xClient: dropped, no error
+    end
+```
+
 ## Development
 
 Everything runs through [mise][mise]. There is no Makefile — one task runner is
