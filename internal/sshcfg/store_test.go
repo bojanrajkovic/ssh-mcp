@@ -268,6 +268,37 @@ func TestOpenRejectsADirectoryTooDeepForSockets(t *testing.T) {
 
 // A stanza the server never wrote must not resolve. Without this check ssh
 // would happily treat the identifier as a literal hostname.
+// Promotion is the single step that turns a captured key into a trusted one,
+// so it has to move the line and consume the quarantine in the same call.
+func TestPromoteMovesTheQuarantinedKeyIntoKnownHosts(t *testing.T) {
+	s := newStore(t)
+	id := ID("conn_deadbeef")
+	line := "[example.com]:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake\n"
+	if err := os.WriteFile(s.QuarantinePath(id), []byte(line), 0o600); err != nil {
+		t.Fatalf("write quarantine: %v", err)
+	}
+
+	if err := s.Promote(id); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	recorded, err := os.ReadFile(s.KnownHostsPath())
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	if string(recorded) != line {
+		t.Errorf("known_hosts = %q, want %q", recorded, line)
+	}
+	if _, err := os.Stat(s.QuarantinePath(id)); !os.IsNotExist(err) {
+		t.Errorf("quarantine survived promotion (stat err: %v)", err)
+	}
+	// A second promotion has nothing to promote and must say so rather than
+	// silently succeeding.
+	if err := s.Promote(id); err == nil {
+		t.Error("Promote with no quarantine succeeded")
+	}
+}
+
 func TestResolveRejectsUnknownID(t *testing.T) {
 	s := newStore(t)
 	if _, err := s.Resolve(t.Context(), ID("conn_deadbeef")); err == nil {

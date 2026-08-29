@@ -96,6 +96,44 @@ func (s *Store) ConfigPath() string { return filepath.Join(s.dir, "config") }
 // never land in it.
 func (s *Store) KnownHostsPath() string { return filepath.Join(s.dir, "known_hosts") }
 
+// QuarantinePath holds the key captured on a connection's first contact,
+// before anything trusts it. Nothing reads this file as trust: it exists so
+// the key can be shown to a human before promotion.
+func (s *Store) QuarantinePath(id ID) string {
+	return filepath.Join(s.dir, string(id)+".quarantine")
+}
+
+// CaptureKnownHosts is the UserKnownHostsFile value for a capture run: the
+// quarantine first so ssh records a new key there, then both trusted files so
+// a key that is already trusted records nothing.
+func (s *Store) CaptureKnownHosts(id ID) string {
+	return quote(s.QuarantinePath(id)) + " " + quote(s.KnownHostsPath()) + " " +
+		quote(userKnownHosts(s.userConfig))
+}
+
+// Promote moves id's quarantined key into the server's known_hosts, which is
+// what makes it trusted. The quarantine file is consumed.
+func (s *Store) Promote(id ID) error {
+	return s.withLock(func() error {
+		data, err := os.ReadFile(s.QuarantinePath(id))
+		if err != nil {
+			return fmt.Errorf("sshcfg: read quarantine: %w", err)
+		}
+		f, err := os.OpenFile(s.KnownHostsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, fileMode)
+		if err != nil {
+			return fmt.Errorf("sshcfg: open known_hosts: %w", err)
+		}
+		if _, err := f.Write(data); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("sshcfg: append known_hosts: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("sshcfg: close known_hosts: %w", err)
+		}
+		return os.Remove(s.QuarantinePath(id))
+	})
+}
+
 // ControlDir holds ControlMaster sockets.
 //
 // These live under the server's directory rather than ~/.ssh so that nothing

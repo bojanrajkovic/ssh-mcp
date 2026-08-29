@@ -2,6 +2,7 @@ package conn
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,6 +34,11 @@ func TestClassify(t *testing.T) {
 		"changed host key": {
 			"@@@@@@@@@@@@@@@@@@@@\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.",
 			ErrHostKeyChanged,
+		},
+		"unknown host key": {
+			"No ED25519 host key is known for [example.com]:22 and you have requested " +
+				"strict checking.\nHost key verification failed.",
+			ErrHostKeyUnknown,
 		},
 		"permission denied":   {"user@host: Permission denied (publickey).", ErrAuth},
 		"too many auth":       {"Received disconnect from 10.0.0.1: Too many authentication failures", ErrAuth},
@@ -126,6 +132,93 @@ func TestConnectSurfacesSentinels(t *testing.T) {
 				t.Errorf("error %q dropped the ssh diagnostic", err)
 			}
 		})
+	}
+}
+
+// A capture must never leave a control master behind: a later strict connect
+// would multiplex over it and skip verification entirely. The flag order is
+// the contract, so it is pinned exactly.
+func TestCapturePassesOverridesAndFailsWithoutAKey(t *testing.T) {
+	fake := sshtest.InstallFakeSSH(t, sshtest.Reply{Exit: 0})
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	// The fake records nothing into quarantine, so the capture reports no key.
+	if _, err := c.Capture(t.Context(), id); err == nil {
+		t.Error("Capture with nothing recorded succeeded")
+	}
+
+	want := []string{
+		"-F", store.ConfigPath(),
+		"-o", "UserKnownHostsFile=" + store.CaptureKnownHosts(id),
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
+		string(id), "true",
+	}
+	if diff := cmp.Diff(want, fake.LastCall(t)); diff != "" {
+		t.Errorf("ssh arguments (-want +got):\n%s", diff)
+	}
+}
+
+func TestPendingParsesTheQuarantinedKey(t *testing.T) {
+	sshtest.InstallFake(t, "ssh-keygen", sshtest.Reply{
+		Stdout: "256 SHA256:AbCdEf [example.com]:22 (ED25519)\n", Exit: 0,
+	})
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if werr := os.WriteFile(store.QuarantinePath(id), []byte("x\n"), 0o600); werr != nil {
+		t.Fatalf("write quarantine: %v", werr)
+	}
+
+	key, err := c.Pending(t.Context(), id)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	want := Key{Host: "[example.com]:22", Type: "ED25519", Fingerprint: "SHA256:AbCdEf"}
+	if diff := cmp.Diff(want, key); diff != "" {
+		t.Errorf("key (-want +got):\n%s", diff)
+	}
+}
+
+// More than one quarantined key means the file was not written by a capture,
+// and guessing which key the human saw would defeat the confirmation.
+func TestPendingRefusesMultipleKeys(t *testing.T) {
+	sshtest.InstallFake(t, "ssh-keygen", sshtest.Reply{
+		Stdout: "256 SHA256:a h1 (ED25519)\n3072 SHA256:b h2 (RSA)\n", Exit: 0,
+	})
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := os.WriteFile(store.QuarantinePath(id), []byte("x\ny\n"), 0o600); err != nil {
+		t.Fatalf("write quarantine: %v", err)
+	}
+
+	if _, err := c.Pending(t.Context(), id); err == nil {
+		t.Fatal("Pending with two keys succeeded")
+	}
+	if _, err := os.Stat(store.QuarantinePath(id)); !os.IsNotExist(err) {
+		t.Errorf("suspect quarantine survived (stat err: %v)", err)
+	}
+}
+
+func TestPendingWithNoQuarantineSaysSo(t *testing.T) {
+	c, store := newConnector(t)
+	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if _, err := c.Pending(t.Context(), id); err == nil ||
+		!strings.Contains(err.Error(), "no host key pending") {
+		t.Errorf("Pending = %v, want a no-key-pending error", err)
 	}
 }
 

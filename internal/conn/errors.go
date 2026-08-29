@@ -15,6 +15,11 @@ var (
 	// one already recorded. accept-new permits unknown hosts but never this.
 	ErrHostKeyChanged = errors.New("remote host key changed")
 
+	// ErrHostKeyUnknown means the host presented a key that no known_hosts
+	// line trusts yet. Strict checking refuses it; the confirmation flow
+	// decides whether it becomes trusted.
+	ErrHostKeyUnknown = errors.New("host key not yet trusted")
+
 	// ErrAuth means the connection reached sshd and was refused: no acceptable
 	// key, wrong user, or an agent that holds nothing useful.
 	ErrAuth = errors.New("authentication failed")
@@ -43,6 +48,11 @@ var signatures = []struct {
 	{ErrHostKeyChanged, []string{
 		"REMOTE HOST IDENTIFICATION HAS CHANGED",
 		"host key for", // "... has changed"
+	}},
+	// Before ErrAuth: strict checking's refusal of an unknown key also ends
+	// with "Host key verification failed".
+	{ErrHostKeyUnknown, []string{
+		"host key is known", // "No ED25519 host key is known for ..."
 	}},
 	{ErrUnreachable, []string{
 		"Connection refused",
