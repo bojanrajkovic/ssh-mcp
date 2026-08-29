@@ -4,11 +4,6 @@ An MCP server that gives agents persistent SSH connections. Connect once for a
 reusable id, then execute commands, move files, and run long jobs over a
 multiplexed OpenSSH channel instead of paying connection setup on every call.
 
-> **Status:** the tool surface is complete and tested against real sshd on
-> Linux and macOS, and against containerised Alpine and Debian remotes. Not yet
-> released. See the [design document][design] for the specification and
-> `docs/adr/` for the decisions.
-
 ## Why not just run `ssh`?
 
 `ControlMaster` in `~/.ssh/config` plus an `ssh` allowlist gives you connection
@@ -152,5 +147,4 @@ Individual tasks:
 Install the git hooks with `lefthook install`. They run gofumpt on staged files
 and check commit message format; full lint and tests are CI's job.
 
-[design]: https://outline.gaur-kardashev.ts.net/doc/ssh-mcp-persistent-ssh-connections-for-agents-design-ifTebcw28w
 [mise]: https://mise.jdx.dev
