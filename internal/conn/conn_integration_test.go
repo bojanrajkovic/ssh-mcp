@@ -117,7 +117,7 @@ func TestFirstContactRequiresConfirmation(t *testing.T) {
 		t.Errorf("capture wrote known_hosts (stat err: %v)", err)
 	}
 
-	if err := store.Promote(id); err != nil {
+	if err := store.Promote(id, key.Fingerprint); err != nil {
 		t.Fatalf("Promote: %v", err)
 	}
 	if err := c.Dial(ctx, id); err != nil {

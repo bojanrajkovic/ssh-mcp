@@ -47,7 +47,7 @@ authoritative.
 The first connection to a new host stops until a human confirms its key
 fingerprint. When the client cannot show a confirmation dialog, ssh_connect
 returns the fingerprint instead: show it to the human, and call
-ssh_confirm_host_key only after they approve.`
+ssh_confirm_host_key only after they confirm.`
 
 // Deps are the collaborators a server needs.
 type Deps struct {

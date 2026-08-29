@@ -148,20 +148,32 @@ func TestConnectThenExecThroughTheProtocol(t *testing.T) {
 	_ = ctx
 }
 
+// pairedHostKeyLine and pairedFingerprint are a matched ed25519 known_hosts
+// line and the SHA256 fingerprint ssh-keygen -lf reports for it, generated
+// once with:
+//
+//	ssh-keygen -t ed25519 -f /tmp/k -N "" && \
+//	  echo "example.com $(cut -d' ' -f1,2 /tmp/k.pub)" > /tmp/kh && \
+//	  ssh-keygen -lf /tmp/kh
+const (
+	pairedHostKeyLine = "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPApvFBt/hXQ0+il4+O0rdYgUbZwATBwxQwR/4uWDYjD"
+	pairedFingerprint = "SHA256:iKtvssqLgWNZomvlTndSBhcKujKK79rcqzYJ0GLUyiA"
+)
+
 // hostKeyFakes stubs the whole confirmation round-trip: a bare connect that
-// fails until the server's known_hosts is non-empty, a capture that records a
-// canned key into quarantine, and an ssh-keygen reporting its fingerprint.
+// fails until the server's known_hosts is non-empty, and a capture that
+// records a real key into quarantine so the fingerprint it reports is the one
+// actually computed in-process, not a canned value.
 func hostKeyFakes(t *testing.T, deps Deps) (sshcfg.ID, string) {
 	t.Helper()
 	id, err := sshcfg.Options{Host: "example.com"}.Derive()
 	if err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
-	const fingerprint = "SHA256:testfingerprint"
 	sshtest.InstallFakeSSH(t,
 		sshtest.Reply{
 			Match: "accept-new",
-			Do:    "printf 'example.com ssh-ed25519 AAAAfake\\n' > " + deps.Store.QuarantinePath(id),
+			Do:    "printf '" + pairedHostKeyLine + "\\n' > " + deps.Store.QuarantinePath(id),
 		},
 		sshtest.Reply{
 			Do: "[ -s " + deps.Store.KnownHostsPath() + " ] || { " +
@@ -169,9 +181,7 @@ func hostKeyFakes(t *testing.T, deps Deps) (sshcfg.ID, string) {
 				"echo 'Host key verification failed.' >&2; exit 255; }",
 		},
 	)
-	sshtest.InstallFake(t, "ssh-keygen",
-		sshtest.Reply{Stdout: "256 " + fingerprint + " example.com (ED25519)\n"})
-	return id, fingerprint
+	return id, pairedFingerprint
 }
 
 func resultText(res *mcp.CallToolResult) string {
@@ -277,6 +287,47 @@ func TestConfirmHostKeyFallbackRoundTrip(t *testing.T) {
 		map[string]any{"id": string(id), "fingerprint": fingerprint}, &connected)
 	if connected.ID != string(id) {
 		t.Errorf("confirmed id = %q, want %q", connected.ID, id)
+	}
+}
+
+// A tool-supplied id must be validated before it ever reaches filepath.Join,
+// or "../../../tmp/evil" would let a caller write outside the store directory.
+func TestConfirmHostKeyRejectsAPathTraversalID(t *testing.T) {
+	cs := session(t, testDeps(t))
+
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "ssh_confirm_host_key",
+		Arguments: map[string]any{"id": "../../../tmp/evil", "fingerprint": "SHA256:whatever"},
+	})
+	if err != nil {
+		t.Fatalf("ssh_confirm_host_key: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("ssh_confirm_host_key accepted a path-traversal id")
+	}
+	if _, err := os.Stat("/tmp/evil"); !os.IsNotExist(err) {
+		t.Fatalf("a file was created outside the store directory (stat err: %v)", err)
+	}
+}
+
+// An id that is shaped correctly but names no stanza must not reach Promote
+// or Dial at all — confirming a connection that ssh_connect never created
+// would dial a stanza that does not exist.
+func TestConfirmHostKeyRejectsAnUnknownID(t *testing.T) {
+	cs := session(t, testDeps(t))
+
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "ssh_confirm_host_key",
+		Arguments: map[string]any{"id": "conn_deadbeef", "fingerprint": "SHA256:whatever"},
+	})
+	if err != nil {
+		t.Fatalf("ssh_confirm_host_key: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("ssh_confirm_host_key accepted an unknown id")
+	}
+	if !strings.Contains(resultText(res), "no connection") {
+		t.Errorf("error %q does not say the connection is unknown", resultText(res))
 	}
 }
 

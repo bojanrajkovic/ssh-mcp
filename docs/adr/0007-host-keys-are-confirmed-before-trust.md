@@ -27,18 +27,33 @@ silently too.
 
 The key is captured, not scanned. `ssh_connect` first dry-runs ssh with
 `accept-new` pointed at a quarantine known_hosts under the server's directory.
-ssh itself negotiates and records the exact key it would use, and
-`ssh-keygen -lf` turns that line into the fingerprint a human recognizes.
-`ssh-keyscan` was rejected because it cannot reach through `ProxyJump` and
-resolves connection parameters a second time, separately from ssh.
+ssh itself negotiates and records the exact key it would use. `ssh-keyscan`
+was rejected because it cannot reach through `ProxyJump` and resolves
+connection parameters a second time, separately from ssh.
+
+That dry run disables every authentication method. Key exchange records the
+host key before authentication happens, so with nothing left to authenticate
+with, the run can never open a connection to a host the human has not yet
+confirmed — an agent socket or a `SetEnv` value is never exposed to a host
+that may be about to be refused. The run failing is expected: a capture
+succeeds when the quarantine holds a key afterward, not when ssh exits zero.
+
+Fingerprints are computed in-process from the recorded known_hosts line: SHA256
+of the decoded key blob, base64-encoded without padding and prefixed
+`SHA256:`, which matches what `ssh-keygen -lf` reports. ssh-keygen is not
+needed at runtime.
 
 Confirmation asks the human, one prompt per unconfirmed key. When the client
-declares elicitation, `ssh_connect` elicits with the fingerprint. The
-elicitation rides as a multi-round-trip input request (SEP-2322) because the
-protocol forbids a mid-call `elicitation/create` from 2026-07-28 on; the SDK
-bridges older clients itself, so one path serves both generations. Accept
+declares elicitation, `ssh_connect` elicits with the fingerprint. Since
+protocol 2026-07-28, a tool call cannot send elicitation/create mid-call.
+Instead the call returns an input request, the client answers it, and the
+call is retried with the answer attached — the protocol's multi-round-trip
+pattern ([SEP-2322](https://modelcontextprotocol.io/specification/draft/client/elicitation)).
+The SDK bridges older clients itself, so one path serves both. Accept
 promotes the quarantined line into the server's known_hosts and the connect
-proceeds. Decline discards the quarantine and the connect fails. Nothing
+proceeds; promotion re-verifies the fingerprint against that line under the
+store's lock, so the key a human confirmed is provably the key that gets
+trusted. Decline discards the quarantine and the connect fails. Nothing
 records a refusal: known_hosts stays the only trust state, and the next
 connect asks again.
 

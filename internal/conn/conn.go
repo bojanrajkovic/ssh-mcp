@@ -64,7 +64,7 @@ func (c *Connector) Dial(ctx context.Context, id sshcfg.ID) error {
 	return nil
 }
 
-// Key is one captured host key, described the way ssh-keygen reports it.
+// Key is one captured host key, described the way `ssh-keygen -lf` would.
 type Key struct {
 	Host        string // the known_hosts pattern the key was recorded under
 	Type        string // ED25519, RSA, ...
@@ -72,24 +72,33 @@ type Key struct {
 }
 
 // Capture dry-runs id's connection so an unconfirmed host key lands in its
-// quarantine file, and reports that key. The run leaves no control master
-// behind: a master established here would let a later strict connect
-// multiplex over a session that was never verified.
+// quarantine file, and reports that key. ControlPath=none alone is enough to
+// leave no control master behind: a master established here would let a
+// later strict connect multiplex over a connection that was never verified.
 //
-// A failure after the key was recorded — an auth refusal, say — still counts
-// as a capture. Trust and authentication are independent questions.
+// Every authentication method is disabled too. Key exchange records the host
+// key before authentication is attempted, so with nothing left to
+// authenticate with, this run can never open a connection to a host the
+// human has not yet confirmed — an agent socket, a SetEnv value, nothing the
+// stanza carries is ever exposed to a host that may be about to be refused.
+//
+// The run therefore always fails. A capture succeeds when the quarantine
+// holds a key afterward, regardless of the run's exit status.
 func (c *Connector) Capture(ctx context.Context, id sshcfg.ID) (Key, error) {
-	quarantine := c.store.QuarantinePath(id)
-	if err := os.Remove(quarantine); err != nil && !os.IsNotExist(err) {
+	if err := c.store.Discard(id); err != nil {
 		return Key{}, fmt.Errorf("capture %s: clear quarantine: %w", id, err)
 	}
 	_, runErr := c.run(ctx,
 		"-o", "UserKnownHostsFile="+c.store.CaptureKnownHosts(id),
 		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "ControlMaster=no",
 		"-o", "ControlPath=none",
+		"-o", "HashKnownHosts=no",
+		"-o", "PubkeyAuthentication=no",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "ForwardAgent=no",
 		string(id), "true")
-	key, err := c.Pending(ctx, id)
+	key, err := c.Pending(id)
 	if err != nil && runErr != nil {
 		return Key{}, fmt.Errorf("capture %s: %w", id, runErr)
 	}
@@ -99,43 +108,35 @@ func (c *Connector) Capture(ctx context.Context, id sshcfg.ID) (Key, error) {
 // Pending returns the quarantined key awaiting confirmation for id. The
 // quarantine file being absent means nothing is pending, which is its own
 // error rather than an empty Key.
-func (c *Connector) Pending(ctx context.Context, id sshcfg.ID) (Key, error) {
-	path := c.store.QuarantinePath(id)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+//
+// The fingerprint is computed in-process from the recorded known_hosts line;
+// nothing here shells out.
+func (c *Connector) Pending(id sshcfg.ID) (Key, error) {
+	//nolint:gosec // a fixed store directory plus a derived identifier, never caller text
+	data, err := os.ReadFile(c.store.QuarantinePath(id))
+	if os.IsNotExist(err) {
 		return Key{}, fmt.Errorf("no host key pending for %s", id)
 	}
-
-	//nolint:gosec // fixed flags plus a path the store derived
-	cmd := exec.CommandContext(ctx, "ssh-keygen", "-lf", path)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
 	if err != nil {
-		return Key{}, fmt.Errorf("ssh-keygen -lf %s: %w: %s", path, err, strings.TrimSpace(stderr.String()))
+		return Key{}, fmt.Errorf("read quarantine: %w", err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	// ponytail: exactly one pending key per connection. A capture records the
 	// single key ssh negotiated; more than one means something else wrote the
 	// file, and starting over is safer than guessing which one was seen.
 	if len(lines) != 1 {
-		_ = os.Remove(path)
+		if derr := c.store.Discard(id); derr != nil {
+			return Key{}, fmt.Errorf("discard quarantine for %s: %w", id, derr)
+		}
 		return Key{}, fmt.Errorf("quarantine for %s held %d keys; run ssh_connect again", id, len(lines))
 	}
-	return parseKeygen(lines[0])
-}
 
-// parseKeygen splits one `ssh-keygen -lf` line: "256 SHA256:... host (TYPE)".
-func parseKeygen(line string) (Key, error) {
-	f := strings.Fields(line)
-	if len(f) < 4 || !strings.HasPrefix(f[len(f)-1], "(") {
-		return Key{}, fmt.Errorf("unexpected ssh-keygen output: %q", line)
+	host, keyType, fingerprint, err := sshcfg.ParseHostKeyLine(lines[0])
+	if err != nil {
+		return Key{}, fmt.Errorf("parse quarantined key: %w", err)
 	}
-	return Key{
-		Fingerprint: f[1],
-		Host:        strings.Join(f[2:len(f)-1], " "),
-		Type:        strings.Trim(f[len(f)-1], "()"),
-	}, nil
+	return Key{Host: host, Type: keyType, Fingerprint: fingerprint}, nil
 }
 
 // Check reports whether a control master is currently running. A connection

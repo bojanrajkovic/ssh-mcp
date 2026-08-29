@@ -28,7 +28,7 @@ mise use -g github:bojanrajkovic/ssh-mcp   # or: go install github.com/bojanrajk
 | Tool | Does |
 |------|------|
 | `ssh_connect` | Open or reuse a connection, returning an id. Idempotent. |
-| `ssh_confirm_host_key` | Trust a first-contact host key after a human approved its fingerprint. |
+| `ssh_confirm_host_key` | Trust a first-contact host key after a human confirmed its fingerprint. |
 | `ssh_exec` | Run a command; returns exit code, stdout and stderr separately. |
 | `ssh_exec_async` | Start a command that survives the connection dropping. |
 | `ssh_job_status` / `ssh_job_wait` | Peek at a job, or block until it finishes. |
@@ -73,7 +73,7 @@ The first connection to a new host stops until a human confirms its key
 fingerprint, the same decision interactive `ssh` asks for. Clients that
 support MCP elicitation show a confirmation dialog. For clients that do not,
 `ssh_connect` returns the fingerprint and the agent calls
-`ssh_confirm_host_key` once the human approves. Hosts already trusted in your
+`ssh_confirm_host_key` once the human confirms. Hosts already trusted in your
 own `known_hosts` connect without any prompt, and changed keys are always
 refused. Set `SSH_MCP_ACCEPT_NEW` to any value to skip confirmation and trust
 new keys automatically; each fingerprint is still logged. See

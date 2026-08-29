@@ -297,16 +297,17 @@ func TestOpenMigratesAcceptNewStanzas(t *testing.T) {
 }
 
 // Promotion is the single step that turns a captured key into a trusted one,
-// so it has to move the line and consume the quarantine in the same call.
+// so it has to move the line and consume the quarantine in the same call —
+// and only when the fingerprint it is handed matches what is actually there.
 func TestPromoteMovesTheQuarantinedKeyIntoKnownHosts(t *testing.T) {
 	s := newStore(t)
 	id := ID("conn_deadbeef")
-	line := "[example.com]:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake\n"
+	line := pairedHostKeyLine + "\n"
 	if err := os.WriteFile(s.QuarantinePath(id), []byte(line), 0o600); err != nil {
 		t.Fatalf("write quarantine: %v", err)
 	}
 
-	if err := s.Promote(id); err != nil {
+	if err := s.Promote(id, pairedFingerprint); err != nil {
 		t.Fatalf("Promote: %v", err)
 	}
 
@@ -320,10 +321,67 @@ func TestPromoteMovesTheQuarantinedKeyIntoKnownHosts(t *testing.T) {
 	if _, err := os.Stat(s.QuarantinePath(id)); !os.IsNotExist(err) {
 		t.Errorf("quarantine survived promotion (stat err: %v)", err)
 	}
-	// A second promotion has nothing to promote and must say so rather than
-	// silently succeeding.
-	if err := s.Promote(id); err == nil {
+	// A second promotion has nothing left to promote and must say so rather
+	// than silently succeeding.
+	if err := s.Promote(id, pairedFingerprint); err == nil {
 		t.Error("Promote with no quarantine succeeded")
+	}
+}
+
+// The compare happens under the lock guarding the write, so a mismatch has to
+// refuse the promotion outright and leave the quarantine exactly as it was —
+// there is no unverified second chance for a different key to slip through.
+func TestPromoteRejectsAWrongFingerprintAndKeepsTheQuarantine(t *testing.T) {
+	s := newStore(t)
+	id := ID("conn_deadbeef")
+	line := pairedHostKeyLine + "\n"
+	if err := os.WriteFile(s.QuarantinePath(id), []byte(line), 0o600); err != nil {
+		t.Fatalf("write quarantine: %v", err)
+	}
+
+	err := s.Promote(id, "SHA256:not-it")
+	if err == nil {
+		t.Fatal("Promote with a wrong fingerprint succeeded")
+	}
+	if strings.Contains(err.Error(), pairedFingerprint) {
+		t.Errorf("error %q leaks the correct fingerprint", err)
+	}
+	if _, err := os.Stat(s.QuarantinePath(id)); err != nil {
+		t.Errorf("quarantine did not survive a mismatch: %v", err)
+	}
+	if _, err := os.Stat(s.KnownHostsPath()); !os.IsNotExist(err) {
+		t.Errorf("known_hosts was written despite a mismatch (stat err: %v)", err)
+	}
+}
+
+func TestPromoteWithNoQuarantineErrors(t *testing.T) {
+	s := newStore(t)
+	if err := s.Promote(ID("conn_deadbeef"), pairedFingerprint); err == nil {
+		t.Error("Promote with no quarantine succeeded")
+	}
+}
+
+// A SetEnv value has no syntactic limit on what it may contain, so the
+// literal text of the legacy keyword pair can appear inside one without being
+// the keyword itself. An unanchored replace would rewrite it anyway; the
+// line-anchored migration must not.
+func TestMigrateStrictCheckingIgnoresTheLiteralInsideASetEnvValue(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Ensure(Options{Host: "example.com"}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	poisoned := readConfig(t, s) + "\n    SetEnv NOTE=\"StrictHostKeyChecking accept-new\"\n"
+	if err := os.WriteFile(s.ConfigPath(), []byte(poisoned), 0o600); err != nil {
+		t.Fatalf("write poisoned config: %v", err)
+	}
+
+	reopened, err := Open(s.dir, s.userConfig)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	cfg := readConfig(t, reopened)
+	if !strings.Contains(cfg, `SetEnv NOTE="StrictHostKeyChecking accept-new"`) {
+		t.Errorf("migration rewrote the literal inside a SetEnv value:\n%s", cfg)
 	}
 }
 

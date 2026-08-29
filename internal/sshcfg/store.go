@@ -3,6 +3,8 @@ package sshcfg
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,15 +72,25 @@ func Open(dir, userConfig string) (*Store, error) {
 			return nil, fmt.Errorf("sshcfg: create %s: %w", d, err)
 		}
 	}
-	if err := s.withLock(s.migrateStrictChecking); err != nil {
+	if err := s.migrateStrictChecking(); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
+// legacyStrictChecking is the keyword pair stanzas rendered before host key
+// confirmation existed (docs/adr/0007).
+const legacyStrictChecking = "StrictHostKeyChecking accept-new"
+
 // migrateStrictChecking rewrites stanzas written before host key confirmation
-// existed (docs/adr/0007). Those said accept-new, which silently trusts any
-// new key — the behavior confirmation replaces. The caller holds the lock.
+// existed. Those said accept-new, which silently trusts any new key — the
+// behavior confirmation replaces.
+//
+// The read and the "is there anything to do" check happen without the lock.
+// Most startups find nothing to migrate, and a directory shared by several
+// server processes would otherwise serialize every one of them on a flock for
+// no reason. The lock is only taken — and the file re-read and rewritten
+// under it — when a rewrite actually turns out to be needed.
 func (s *Store) migrateStrictChecking() error {
 	data, err := os.ReadFile(s.ConfigPath())
 	if os.IsNotExist(err) {
@@ -87,12 +99,41 @@ func (s *Store) migrateStrictChecking() error {
 	if err != nil {
 		return fmt.Errorf("sshcfg: read config: %w", err)
 	}
-	updated := strings.ReplaceAll(string(data),
-		"StrictHostKeyChecking accept-new", "StrictHostKeyChecking yes")
-	if updated == string(data) {
+	if migrateStrictCheckingLines(string(data)) == string(data) {
 		return nil
 	}
-	return s.writeAtomic(s.ConfigPath(), updated)
+	return s.withLock(func() error {
+		data, err := os.ReadFile(s.ConfigPath())
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("sshcfg: read config: %w", err)
+		}
+		updated := migrateStrictCheckingLines(string(data))
+		if updated == string(data) {
+			return nil
+		}
+		return s.writeAtomic(s.ConfigPath(), updated)
+	})
+}
+
+// migrateStrictCheckingLines rewrites accept-new to yes, but only on a line
+// that is exactly the StrictHostKeyChecking keyword pair once trimmed.
+//
+// An unanchored replace over the whole file would also rewrite the literal
+// text if it ever appeared inside a SetEnv value: ssh_config puts no
+// syntactic limit on what a value may contain.
+func migrateStrictCheckingLines(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != legacyStrictChecking {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + "StrictHostKeyChecking yes"
+	}
+	return strings.Join(lines, "\n")
 }
 
 // checkControlPathFits rejects a directory whose control sockets could not
@@ -133,26 +174,104 @@ func (s *Store) CaptureKnownHosts(id ID) string {
 		quote(userKnownHosts(s.userConfig))
 }
 
-// Promote moves id's quarantined key into the server's known_hosts, which is
-// what makes it trusted. The quarantine file is consumed.
-func (s *Store) Promote(id ID) error {
+// keyTypeNames maps a known_hosts key type field to the short name ssh-keygen
+// -lf reports. A type this server has never seen falls back to the raw field,
+// since new algorithms should still fingerprint rather than fail closed.
+var keyTypeNames = map[string]string{
+	"ssh-ed25519":                        "ED25519",
+	"ssh-rsa":                            "RSA",
+	"ecdsa-sha2-nistp256":                "ECDSA",
+	"ecdsa-sha2-nistp384":                "ECDSA",
+	"ecdsa-sha2-nistp521":                "ECDSA",
+	"sk-ssh-ed25519@openssh.com":         "ED25519-SK",
+	"sk-ecdsa-sha2-nistp256@openssh.com": "ECDSA-SK",
+}
+
+// ParseHostKeyLine parses one known_hosts line into the host pattern, key
+// type, and fingerprint a human recognizes.
+//
+// The fingerprint is computed in-process rather than by shelling out to
+// ssh-keygen -lf: it is SHA256 of the decoded key blob, base64-encoded
+// without padding and prefixed "SHA256:", which is the exact value ssh-keygen
+// reports. Doing this in Go keeps confirmation from depending on a second
+// binary being on PATH.
+func ParseHostKeyLine(line string) (hostPattern, keyType, fingerprint string, err error) {
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return "", "", "", fmt.Errorf("sshcfg: %q is not a known_hosts line", line)
+	}
+	blob, err := base64.StdEncoding.DecodeString(fields[2])
+	if err != nil {
+		return "", "", "", fmt.Errorf("sshcfg: decode key blob: %w", err)
+	}
+	sum := sha256.Sum256(blob)
+	fingerprint = "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+	keyType = fields[1]
+	if name, ok := keyTypeNames[keyType]; ok {
+		keyType = name
+	}
+	return fields[0], keyType, fingerprint, nil
+}
+
+// Promote verifies id's quarantined key against wantFingerprint and, on a
+// match, moves it into the server's known_hosts — the step that makes it
+// trusted. The quarantine file is consumed either way it can be: promotion
+// removes it, and a corrupt quarantine (anything but one line) is discarded
+// rather than left to confuse the next attempt.
+//
+// The compare happens under the same lock as the write, not before it. That
+// is the point: nothing can replace the quarantine file between the fingerprint
+// a human confirmed and the bytes actually appended to known_hosts.
+func (s *Store) Promote(id ID, wantFingerprint string) error {
 	return s.withLock(func() error {
 		data, err := os.ReadFile(s.QuarantinePath(id))
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no host key pending for %s", id)
+		}
 		if err != nil {
 			return fmt.Errorf("sshcfg: read quarantine: %w", err)
 		}
-		f, err := os.OpenFile(s.KnownHostsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, fileMode)
+
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		// Exactly one pending key per connection. A capture records the
+		// single key ssh negotiated; more than one means something else wrote
+		// the file, and starting over is safer than guessing which was seen.
+		if len(lines) != 1 {
+			_ = os.Remove(s.QuarantinePath(id))
+			return fmt.Errorf("quarantine for %s held %d keys; run ssh_connect again", id, len(lines))
+		}
+
+		_, _, fingerprint, err := ParseHostKeyLine(lines[0])
 		if err != nil {
-			return fmt.Errorf("sshcfg: open known_hosts: %w", err)
+			return fmt.Errorf("sshcfg: parse quarantined key: %w", err)
 		}
-		if _, err := f.Write(data); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("sshcfg: append known_hosts: %w", err)
+		if fingerprint != wantFingerprint {
+			// The quarantine stays. The correct fingerprint never appears in
+			// this error: it is exactly the value a caller probing for it
+			// would be trying to learn.
+			return fmt.Errorf("fingerprint does not match the key pending for %s", id)
 		}
-		if err := f.Close(); err != nil {
-			return fmt.Errorf("sshcfg: close known_hosts: %w", err)
+
+		existing, err := os.ReadFile(s.KnownHostsPath())
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("sshcfg: read known_hosts: %w", err)
+		}
+		if err := s.writeAtomic(s.KnownHostsPath(), string(existing)+string(data)); err != nil {
+			return err
 		}
 		return os.Remove(s.QuarantinePath(id))
+	})
+}
+
+// Discard removes id's pending key without trusting it. Every quarantine
+// deletion outside Promote goes through this, so deletion is serialized the
+// same way promotion is and never races a concurrent Promote.
+func (s *Store) Discard(id ID) error {
+	return s.withLock(func() error {
+		if err := os.Remove(s.QuarantinePath(id)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("sshcfg: discard quarantine: %w", err)
+		}
+		return nil
 	})
 }
 

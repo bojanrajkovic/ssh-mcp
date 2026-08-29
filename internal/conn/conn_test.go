@@ -135,6 +135,17 @@ func TestConnectSurfacesSentinels(t *testing.T) {
 	}
 }
 
+// pairedHostKeyLine and pairedFingerprint are a matched ed25519 known_hosts
+// line and the SHA256 fingerprint it fingerprints to, generated once with:
+//
+//	ssh-keygen -t ed25519 -f /tmp/k -N "" && \
+//	  echo "example.com $(cut -d' ' -f1,2 /tmp/k.pub)" > /tmp/kh && \
+//	  ssh-keygen -lf /tmp/kh
+const (
+	pairedHostKeyLine = "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPApvFBt/hXQ0+il4+O0rdYgUbZwATBwxQwR/4uWDYjD"
+	pairedFingerprint = "SHA256:iKtvssqLgWNZomvlTndSBhcKujKK79rcqzYJ0GLUyiA"
+)
+
 // A capture must never leave a control master behind: a later strict connect
 // would multiplex over it and skip verification entirely. The flag order is
 // the contract, so it is pinned exactly.
@@ -155,8 +166,12 @@ func TestCapturePassesOverridesAndFailsWithoutAKey(t *testing.T) {
 		"-F", store.ConfigPath(),
 		"-o", "UserKnownHostsFile=" + store.CaptureKnownHosts(id),
 		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "ControlMaster=no",
 		"-o", "ControlPath=none",
+		"-o", "HashKnownHosts=no",
+		"-o", "PubkeyAuthentication=no",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "ForwardAgent=no",
 		string(id), "true",
 	}
 	if diff := cmp.Diff(want, fake.LastCall(t)); diff != "" {
@@ -165,23 +180,20 @@ func TestCapturePassesOverridesAndFailsWithoutAKey(t *testing.T) {
 }
 
 func TestPendingParsesTheQuarantinedKey(t *testing.T) {
-	sshtest.InstallFake(t, "ssh-keygen", sshtest.Reply{
-		Stdout: "256 SHA256:AbCdEf [example.com]:22 (ED25519)\n", Exit: 0,
-	})
 	c, store := newConnector(t)
 	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if werr := os.WriteFile(store.QuarantinePath(id), []byte("x\n"), 0o600); werr != nil {
+	if werr := os.WriteFile(store.QuarantinePath(id), []byte(pairedHostKeyLine+"\n"), 0o600); werr != nil {
 		t.Fatalf("write quarantine: %v", werr)
 	}
 
-	key, err := c.Pending(t.Context(), id)
+	key, err := c.Pending(id)
 	if err != nil {
 		t.Fatalf("Pending: %v", err)
 	}
-	want := Key{Host: "[example.com]:22", Type: "ED25519", Fingerprint: "SHA256:AbCdEf"}
+	want := Key{Host: "example.com", Type: "ED25519", Fingerprint: pairedFingerprint}
 	if diff := cmp.Diff(want, key); diff != "" {
 		t.Errorf("key (-want +got):\n%s", diff)
 	}
@@ -190,19 +202,16 @@ func TestPendingParsesTheQuarantinedKey(t *testing.T) {
 // More than one quarantined key means the file was not written by a capture,
 // and guessing which key the human saw would defeat the confirmation.
 func TestPendingRefusesMultipleKeys(t *testing.T) {
-	sshtest.InstallFake(t, "ssh-keygen", sshtest.Reply{
-		Stdout: "256 SHA256:a h1 (ED25519)\n3072 SHA256:b h2 (RSA)\n", Exit: 0,
-	})
 	c, store := newConnector(t)
 	id, err := store.Ensure(sshcfg.Options{Host: "example.com"})
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if err := os.WriteFile(store.QuarantinePath(id), []byte("x\ny\n"), 0o600); err != nil {
+	if err := os.WriteFile(store.QuarantinePath(id), []byte(pairedHostKeyLine+"\n"+pairedHostKeyLine+"\n"), 0o600); err != nil {
 		t.Fatalf("write quarantine: %v", err)
 	}
 
-	if _, err := c.Pending(t.Context(), id); err == nil {
+	if _, err := c.Pending(id); err == nil {
 		t.Fatal("Pending with two keys succeeded")
 	}
 	if _, err := os.Stat(store.QuarantinePath(id)); !os.IsNotExist(err) {
@@ -216,7 +225,7 @@ func TestPendingWithNoQuarantineSaysSo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if _, err := c.Pending(t.Context(), id); err == nil ||
+	if _, err := c.Pending(id); err == nil ||
 		!strings.Contains(err.Error(), "no host key pending") {
 		t.Errorf("Pending = %v, want a no-key-pending error", err)
 	}

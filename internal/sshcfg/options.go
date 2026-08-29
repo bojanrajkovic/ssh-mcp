@@ -66,6 +66,26 @@ const (
 	idHexLen    = 8
 )
 
+// ParseID validates that s has the exact shape Derive produces: idPrefix
+// followed by exactly idHexLen lowercase hex characters.
+//
+// Callers hand ids back to confirmHostKey as free-form strings. Without this
+// check one flows into filepath.Join, where "../../etc" escapes the store
+// directory, and into ssh's argv, where a leading "-" parses as a flag rather
+// than a Host.
+func ParseID(s string) (ID, error) {
+	hex, ok := strings.CutPrefix(s, idPrefix)
+	if !ok || len(hex) != idHexLen {
+		return "", fmt.Errorf("sshcfg: %q is not a connection id", s)
+	}
+	for _, r := range hex {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", fmt.Errorf("sshcfg: %q is not a connection id", s)
+		}
+	}
+	return ID(s), nil
+}
+
 // Validate reports whether the options can be rendered safely.
 //
 // The check that matters is that no field may contain a newline or any other
