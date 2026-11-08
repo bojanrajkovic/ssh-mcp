@@ -60,6 +60,12 @@ add an action by tag.
 Releases are automated: release-please opens a version PR, merging it tags, and
 goreleaser publishes on the tag.
 
+release-please runs as the releaser GitHub App, not `GITHUB_TOKEN`, because
+pushes made with `GITHUB_TOKEN` don't trigger workflows and the release PR
+would get no CI. The app's client ID is the `RELEASER_BOT_CLIENT_ID` variable
+and its key is the `RELEASER_BOT_PRIVATE_KEY` secret, both on the `release`
+environment.
+
 macOS binaries are signed with a Developer ID certificate and notarized by
 Apple, which goreleaser does without a macOS runner. The credentials live on
 the `release` GitHub environment, restricted to `main`, so no other job can read

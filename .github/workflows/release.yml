@@ -17,16 +17,28 @@ jobs:
     name: Release PR
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write # push the release branch and tag
-      pull-requests: write # open the version-bump PR
+    # The releaser bot's key lives on this environment, restricted to main.
+    environment: release
+    permissions: {} # everything below runs as the releaser bot
     outputs:
       released: ${{ steps.release.outputs.release_created }}
       tag: ${{ steps.release.outputs.tag_name }}
     steps:
+      # GITHUB_TOKEN pushes do not trigger workflows, so a release PR opened
+      # with it gets no CI. The bot's installation token does.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASER_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASER_BOT_PRIVATE_KEY }}
+          permission-contents: write # release branch, tag, and GitHub Release
+          permission-pull-requests: write # open the version-bump PR
+          permission-issues: write # autorelease labels on the PR
+
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
