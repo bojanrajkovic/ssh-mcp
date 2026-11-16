@@ -314,7 +314,8 @@ func confirmed[Out any](ctx context.Context, s *Server, req *mcp.CallToolRequest
 			"host %s presented an unconfirmed %s key with fingerprint %s: "+
 				"show the fingerprint to the human, and once they confirm call "+
 				"ssh_confirm_host_key with id %s and the exact fingerprint",
-			key.Host, key.Type, key.Fingerprint, id)
+			key.Host, key.Type, key.Fingerprint, id,
+		)
 	}
 
 	// The elicitation rides as a multi-round-trip input request rather than a

@@ -109,7 +109,8 @@ func validateMeta(meta map[string]string) error {
 			}
 			return fmt.Errorf(
 				"channel: meta key %q must be letters, digits, and underscores and may not start with a digit; "+
-					"the client drops anything else without reporting it", key)
+					"the client drops anything else without reporting it", key,
+			)
 		}
 	}
 	return nil

@@ -27,7 +27,8 @@ func TestContainerMultiplexes(t *testing.T) {
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPath="+sock,
 		"-o", "ControlPersist=30s",
-		srv.Target(), "echo", "first")
+		srv.Target(), "echo", "first",
+	)
 	if out, err := exec.Command("ssh", args...).CombinedOutput(); err != nil {
 		t.Fatalf("first exec: %v\n%s", err, out)
 	}
@@ -88,7 +89,8 @@ func TestContainerJobWrapperSurvivesDisconnect(t *testing.T) {
 			launch := fmt.Sprintf(
 				"mkdir -p %s; setsid nohup sh -c '(sleep 2; echo out-line; echo err-line >&2; exit 7)"+
 					" >%s/out 2>%s/err; echo $? >%s/rc' </dev/null >/dev/null 2>&1 & echo launched",
-				dir, dir, dir, dir)
+				dir, dir, dir, dir,
+			)
 
 			start := time.Now()
 			out, err := run(t, srv, launch)
