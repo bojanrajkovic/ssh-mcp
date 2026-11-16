@@ -140,7 +140,8 @@ func (s *Store) checkControlPathFits() error {
 		return fmt.Errorf(
 			"sshcfg: control sockets under %s would be %d bytes, over the %d-byte limit "+
 				"for Unix domain sockets once ssh appends its suffix; use a shorter directory",
-			s.ControlDir(), longest, controlPathMax-controlPathHeadroom)
+			s.ControlDir(), longest, controlPathMax-controlPathHeadroom,
+		)
 	}
 	return nil
 }
