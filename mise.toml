@@ -2,7 +2,7 @@
 go = "1.27.4"
 "aqua:golangci/golangci-lint" = "2.15.0"
 "aqua:mvdan/gofumpt" = "0.12.0"
-"aqua:goreleaser/goreleaser" = "2.20.2"
+"aqua:goreleaser/goreleaser" = "2.20.3"
 "aqua:zizmorcore/zizmor" = "1.32.0"
 "go:golang.org/x/tools/gopls" = "latest"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
