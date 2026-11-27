@@ -6,7 +6,7 @@ go = "1.27.4"
 "aqua:zizmorcore/zizmor" = "1.33.1"
 "go:golang.org/x/tools/gopls" = "latest"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
-lefthook = "2.2.2"
+lefthook = "2.2.3"
 
 [tasks.fmt]
 description = "Format Go code with gofumpt"
